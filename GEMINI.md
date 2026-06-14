@@ -35,7 +35,7 @@
 3. **Não Adivinhe (Zero Hallucination):** Se a mensagem do usuário for ambígua ou faltar o valor numérico, o assistente deve pedir esclarecimentos, nunca presumir.
 
 ## 4. Invariantes Arquiteturais (A.N.T.)
-- **Camada 1 (Arquitetura):** Documentações de fluxo ficarão em `architecture/`.
+- **Camada 1 (Arquitetura):** Documentações de fluxo ficam em `architecture/` (POPs por camada: fluxo de mensagem, Camada 2/IA e Camada 3/Dados).
 - **Camada 2 (Navegação):** O Antigravity processa a mensagem e invoca as ferramentas apropriadas.
 - **Fonte da Verdade:** O armazenamento primário dos dados é o **Supabase** (Banco de Dados em Nuvem).
 - **Camada 3 (Ferramentas):** Os scripts de conexão com Telegram e Supabase estarão em `tools/` usando **Python**.
