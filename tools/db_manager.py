@@ -51,3 +51,19 @@ def insert_transaction(user_id: int, status: str, valor: float, categoria: str, 
     
     response = supabase.table("gastos").insert(transaction).execute()
     return len(response.data) > 0
+
+def get_transactions(user_id: int, data_inicio: str, data_fim: str) -> list:
+    """
+    Busca todas as transações de um usuário dentro de um período de datas.
+    Retorna uma lista de dicts com as transações encontradas.
+    """
+    response = (
+        supabase.table("gastos")
+        .select("status, valor, categoria, descricao, data")
+        .eq("user_id", user_id)
+        .gte("data", data_inicio)
+        .lte("data", data_fim)
+        .order("data", desc=False)
+        .execute()
+    )
+    return response.data
