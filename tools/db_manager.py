@@ -22,10 +22,13 @@ def get_or_create_user(telegram_id: int, name: str) -> int:
         # Usuário encontrado
         return response.data[0]["id"]
     
-    # 2. Usuário não existe, vamos criar
+    # 2. Usuário não existe, vamos criar.
+    # A coluna `phone` é NOT NULL; o Telegram não fornece o telefone automaticamente,
+    # então usamos o telegram_id (único) como placeholder para satisfazer a constraint.
     new_user = {
         "telegram_id": telegram_id,
         "name": name,
+        "phone": str(telegram_id),
         "created_at": datetime.utcnow().isoformat()
     }
     insert_response = supabase.table("users").insert(new_user).execute()
