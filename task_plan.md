@@ -22,5 +22,5 @@ Este arquivo rastreia as fases, objetivos e checklists do projeto, conforme o Pr
   reusada pelo bot local (`tools/telegram_bot.py`) e pelo endpoint serverless (`api/telegram.py`).
 - Pendências manuais: importar repo na Vercel, setar env vars (4 do `.env` + `WEBHOOK_SECRET`),
   rodar `setWebhook`. Passo a passo em `architecture/pop_deploy_vercel.md`.
-- **Bug aberto:** `users.phone` é NOT NULL e `get_or_create_user` não o preenche → cadastro
-  de usuário NOVO falha. Bot só funciona para usuários já existentes. A definir o conserto.
+- **Bug resolvido:** `users.phone` (NOT NULL) bloqueava cadastro de usuário novo; corrigido
+  preenchendo `phone = str(telegram_id)` em `get_or_create_user`. Cadastro novo testado OK.

@@ -34,9 +34,9 @@ Pesquisas, descobertas e restrições do projeto serão documentadas aqui.
   `WEBHOOK_SECRET` definido no `setWebhook`.
 - Polling e webhook são **exclusivos** no mesmo token (ativar um desativa o outro).
 
-## Bug conhecido (a resolver)
+## Bug resolvido (15/06/2026)
 - A tabela `users` tem a coluna **`phone` como NOT NULL**, mas `get_or_create_user` não a
-  preenche. Resultado: criar um usuário **novo** falha (`23502 not-null violation`); o bot
-  só funciona para usuários já cadastrados. Detectado em 15/06/2026 ao testar com
-  `telegram_id` inexistente. Correção pendente (preencher `phone` no insert ou tornar a
-  coluna nullable no Supabase).
+  preenchia. Resultado: criar um usuário **novo** falhava (`23502 not-null violation`); o
+  bot só funcionava para usuários já cadastrados. Detectado ao testar com `telegram_id`
+  inexistente. **Correção:** `get_or_create_user` agora grava `phone = str(telegram_id)`
+  (placeholder único) ao criar o usuário. Testado: cadastro de usuário novo OK.
