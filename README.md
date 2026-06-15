@@ -92,9 +92,26 @@ python -m tools.telegram_bot
 O bot inicia em modo *polling* e fica aguardando mensagens. No Telegram, envie `/start`
 para se cadastrar e comece a registrar suas finanças.
 
-> ⚠️ O `run_polling()` é um processo de longa duração. O GitHub hospeda apenas o código —
-> para manter o bot no ar 24/7 será necessário um host externo (ex.: Render, Railway,
-> Fly.io). Esse é o próximo passo (fase **G — Gatilho** do protocolo V.L.A.E.G.).
+> ⚠️ O `run_polling()` é um processo de longa duração, usado para **desenvolvimento
+> local**. Em produção o bot roda na Vercel via **webhook** (ver abaixo).
+
+## ☁️ Deploy na Vercel (Webhook)
+
+Em produção o bot roda como função **serverless** na Vercel, no modo **webhook**: o Telegram
+faz um `POST` para [`api/telegram.py`](api/telegram.py) a cada mensagem. A lógica é a mesma
+do modo local — ambos chamam `process_message` em [`tools/message_handler.py`](tools/message_handler.py).
+
+Passo a passo completo em [`architecture/pop_deploy_vercel.md`](architecture/pop_deploy_vercel.md). Resumo:
+
+1. Importe o repositório na Vercel (*Add New Project*).
+2. Configure as variáveis de ambiente (as 4 do `.env` + `WEBHOOK_SECRET`).
+3. Faça o deploy e registre o webhook:
+   ```bash
+   curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<projeto>.vercel.app/api/telegram&secret_token=<WEBHOOK_SECRET>"
+   ```
+
+> ⚠️ Polling e webhook são **mutuamente exclusivos** no mesmo token. Com o webhook ativo,
+> o `run_polling()` local para de receber mensagens. Para voltar ao local: `deleteWebhook`.
 
 ## 💬 Exemplos de uso no bot
 

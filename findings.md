@@ -23,6 +23,20 @@ Pesquisas, descobertas e restrições do projeto serão documentadas aqui.
 - **Segurança:** `.env` e `.venv` no `.gitignore`; nunca versionados (verificado no
   histórico do Git). Modelo de variáveis em `.env.example`.
 
-## Restrição de deploy
-- `run_polling()` exige processo 24/7. O GitHub não hospeda processos contínuos — será
-  necessário host externo na fase G (Render/Railway/Fly.io).
+## Deploy (Fase G) — Vercel + Webhook
+- `run_polling()` exige processo 24/7 e serve só para desenvolvimento local.
+- Plataforma de produção: **Vercel** (serverless). GitHub Pages só serve estático e GitHub
+  Actions não mantém polling 24/7 (jobs grátis ~6h, cron mín. 5 min).
+- Serverless não roda polling → migração para **webhook** (Telegram faz POST por mensagem,
+  modelo event-driven). Endpoint em `api/telegram.py`.
+- Limites Vercel Hobby: **60s por função** (300s com Fluid Compute) — folgado para o fluxo.
+- Segurança do webhook: validar header `X-Telegram-Bot-Api-Secret-Token` contra
+  `WEBHOOK_SECRET` definido no `setWebhook`.
+- Polling e webhook são **exclusivos** no mesmo token (ativar um desativa o outro).
+
+## Bug conhecido (a resolver)
+- A tabela `users` tem a coluna **`phone` como NOT NULL**, mas `get_or_create_user` não a
+  preenche. Resultado: criar um usuário **novo** falha (`23502 not-null violation`); o bot
+  só funciona para usuários já cadastrados. Detectado em 15/06/2026 ao testar com
+  `telegram_id` inexistente. Correção pendente (preencher `phone` no insert ou tornar a
+  coluna nullable no Supabase).

@@ -17,3 +17,16 @@ Este arquivo documenta o que foi feito, erros encontrados, testes e resultados.
   - Injeção obrigatória do JSON Mode habilitada na Groq para blindagem contra erros de Parse/Markdown.
   - `telegram_bot.py` atualizado para gerenciar a árvore de decisão retornada pela IA e tratar envio do template dinâmico ao usuário.
   - Testes "End-to-End" (E2E) realizados com sucesso: O Bot compreendeu a mensagem incompleta, retornou o template, e posteriormente gerou o JSON perfeito, salvando a transação na tabela `gastos` no Supabase via usuário com `telegram_id` vinculado. Núcleo principal do aplicativo está **100% Finalizado e Funcional**.
+- **15/06/2026:**
+  - Organização do repositório no GitHub: criados `README.md`, `.env.example` e a Camada 1
+    (`architecture/` com POPs de fluxo de mensagem, Camada 2/IA e Camada 3/Dados).
+  - Início da **Fase G (Deploy)**. Plataforma escolhida: **Vercel** (webhook), após descartar
+    GitHub Pages (só estático) e GitHub Actions (não roda polling 24/7).
+  - Refatoração polling → webhook: lógica de roteamento extraída para
+    `tools/message_handler.py` (função síncrona `process_message`), reusada pelo bot local
+    e pelo novo endpoint serverless `api/telegram.py`. `telegram_bot.py` virou wrapper fino.
+    Criados `vercel.json` e `architecture/pop_deploy_vercel.md`.
+  - Verificação local OK: `/start`, conversar e relatório (com dicas) funcionando via
+    `process_message` para usuário existente.
+  - **Bug detectado:** `users.phone` é NOT NULL e não é preenchido em `get_or_create_user`
+    → cadastro de usuário NOVO falha. Correção a definir antes de liberar para novos usuários.
