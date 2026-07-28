@@ -5,16 +5,26 @@ from datetime import datetime
 
 load_dotenv()
 
-# Instância Singleton do cliente Supabase
 url: str = os.environ.get("SUPABASE_URL")
 key: str = os.environ.get("SUPABASE_KEY")
-supabase: Client = create_client(url, key)
+
+def _get_client() -> Client:
+    """
+    Cria um cliente Supabase novo a cada chamada (em vez de singleton no import).
+    Em ambientes serverless com container reaproveitado (warm start), um cliente
+    HTTP mantido no escopo do módulo pode ficar com conexões TCP inválidas após
+    o container ser congelado/descongelado, causando falhas tipo
+    "[Errno 16] Device or resource busy" ao tentar reusar o pool de conexões.
+    """
+    return create_client(url, key)
 
 def get_or_create_user(telegram_id: int, name: str) -> int:
     """
-    Busca o usuário pelo telegram_id. 
+    Busca o usuário pelo telegram_id.
     Se não existir, cadastra um novo e retorna o ID interno.
     """
+    supabase = _get_client()
+
     # 1. Tentar buscar o usuário existente
     response = supabase.table("users").select("id").eq("telegram_id", telegram_id).execute()
     
@@ -51,8 +61,8 @@ def insert_transaction(user_id: int, status: str, valor: float, categoria: str, 
         "data": data,
         "created_at": datetime.utcnow().isoformat()
     }
-    
-    response = supabase.table("gastos").insert(transaction).execute()
+
+    response = _get_client().table("gastos").insert(transaction).execute()
     return len(response.data) > 0
 
 def get_transactions(user_id: int, data_inicio: str, data_fim: str) -> list:
@@ -61,7 +71,8 @@ def get_transactions(user_id: int, data_inicio: str, data_fim: str) -> list:
     Retorna uma lista de dicts com as transações encontradas.
     """
     response = (
-        supabase.table("gastos")
+        _get_client()
+        .table("gastos")
         .select("status, valor, categoria, descricao, data")
         .eq("user_id", user_id)
         .gte("data", data_inicio)
