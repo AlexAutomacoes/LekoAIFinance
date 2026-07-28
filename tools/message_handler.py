@@ -110,5 +110,5 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
             return ["A IA retornou uma acao desconhecida."]
 
     except Exception as e:
-        logging.error(f"Erro ao processar mensagem: {e}")
+        logging.error(f"Erro ao processar mensagem: {e}", exc_info=True)
         return ["Ocorreu um erro interno ao tentar entender sua mensagem. Tente novamente."]
