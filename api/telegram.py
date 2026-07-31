@@ -14,6 +14,8 @@ import urllib.request
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
+import httpx
+
 from tools.message_handler import process_message
 
 logging.basicConfig(level=logging.INFO)
@@ -31,6 +33,24 @@ def send_message(chat_id: int, text: str) -> None:
         urllib.request.urlopen(req, timeout=15)
     except Exception as e:
         logging.error(f"Falha ao enviar mensagem ao Telegram: {e}")
+
+
+def send_document(chat_id: int, file_path: str, caption: str = "") -> None:
+    """
+    Envia um arquivo (ex.: PDF) via Telegram Bot API usando multipart/form-data.
+    O sendMessage usa urlencode (form simples), que não serve para upload de
+    binário — por isso aqui usamos httpx (já disponível no processo via supabase),
+    que monta o multipart com o parâmetro `files`.
+    """
+    try:
+        with open(file_path, "rb") as f:
+            files = {"document": (os.path.basename(file_path), f, "application/pdf")}
+            data = {"chat_id": str(chat_id)}
+            if caption:
+                data["caption"] = caption
+            httpx.post(f"{API_BASE}/sendDocument", data=data, files=files, timeout=30)
+    except Exception as e:
+        logging.error(f"Falha ao enviar documento ao Telegram: {e}")
 
 
 class handler(BaseHTTPRequestHandler):
@@ -74,6 +94,9 @@ class handler(BaseHTTPRequestHandler):
         first_name = user.get("first_name", "")
 
         for resposta in process_message(text, telegram_id, first_name):
-            send_message(chat_id, resposta)
+            if isinstance(resposta, dict) and resposta.get("tipo") == "documento":
+                send_document(chat_id, resposta["caminho"], resposta.get("legenda", ""))
+            else:
+                send_message(chat_id, resposta)
 
         self._reply(200, "ok")

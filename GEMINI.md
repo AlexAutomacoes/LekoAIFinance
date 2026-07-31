@@ -40,4 +40,4 @@
 - **Fonte da Verdade:** O armazenamento primário dos dados é o **Supabase** (Banco de Dados em Nuvem).
 - **Camada 3 (Ferramentas):** Os scripts de conexão com Telegram e Supabase estarão em `tools/` usando **Python**.
 - **Segurança:** Nenhum token ou senha será incluído em código-fonte. Tudo ficará no `.env`.
-- **Ambiente Intermediário:** Arquivos temporários gerados durante execução devem residir em `.tmp/`.
+- **Ambiente Intermediário:** Arquivos temporários gerados durante a execução (ex.: PDFs de relatório) usam o diretório temporário do SO via `tempfile.gettempdir()` — único local gravável no serverless da Vercel (`/tmp`) e portável para o dev local (Windows). São descartáveis após o envio.

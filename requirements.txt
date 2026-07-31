@@ -2,3 +2,5 @@ supabase==2.31.0
 python-telegram-bot==22.7
 python-dotenv
 groq==1.4.0
+fpdf2==2.8.5
+httpx

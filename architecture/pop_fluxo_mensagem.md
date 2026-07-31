@@ -33,7 +33,18 @@ de forma conversacional.
 | `pedir_dados` | Envia o template pedindo os dados que faltam |
 | `pedir_periodo` | Pede o período do relatório |
 | `registrar` | Chama `insert_transaction(...)`; confirma sucesso ou avisa falha |
-| `relatorio` | Busca via `get_transactions(...)`, monta o extrato (entradas/saídas/saldo) e envia uma 2ª mensagem com dicas (`generate_financial_tips`) |
+| `relatorio` | Busca via `get_transactions(...)` e envia dicas (`generate_financial_tips`). Até 7 dias: extrato em **texto** (entradas/saídas/saldo). Acima de 7 dias ("mais de 1 semana", `LIMITE_DIAS_PDF`): gera um **PDF** agrupado por categoria (`pdf_report.gerar_pdf_relatorio`) e o envia como documento |
+
+## Contrato de resposta (texto vs. documento)
+
+`process_message` retorna uma **lista** de respostas. Cada item é:
+
+- uma **string** → enviada como mensagem de texto (`send_message` / `reply_text`); **ou**
+- um **dict** `{"tipo": "documento", "caminho": <path>, "legenda": <str>}` → enviado como
+  arquivo (`send_document` via multipart no webhook; `reply_document` no bot local).
+
+O PDF é gravado no diretório temporário do SO (`tempfile.gettempdir()`) e enviado na mesma
+invocação — descartável depois. Decisão PDF-vs-texto é **determinística** (Python), não do LLM.
 
 ## Casos de borda
 

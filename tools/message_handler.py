@@ -6,9 +6,14 @@ Não depende de python-telegram-bot, por isso é reusada tanto pelo bot local (p
 `tools/telegram_bot.py`) quanto pelo endpoint serverless de webhook (`api/telegram.py`).
 """
 import logging
+from datetime import date
 
 from tools.db_manager import get_or_create_user, insert_transaction, get_transactions
 from tools.llm_router import extract_transaction, generate_financial_tips
+from tools.pdf_report import gerar_pdf_relatorio
+
+# Acima deste nº de dias, o relatório vira PDF em vez de texto no chat ("mais de 1 semana").
+LIMITE_DIAS_PDF = 7
 
 
 def _build_welcome(name: str, internal_id: int) -> str:
@@ -49,6 +54,11 @@ def _build_report(transacoes: list, data_inicio: str, data_fim: str) -> str:
     linhas.append(f"  Saldo:          R$ {saldo:.2f}")
 
     return "\n".join(linhas)
+
+
+def _dias_no_periodo(data_inicio: str, data_fim: str) -> int:
+    """Diferença em dias entre as duas datas (formato YYYY-MM-DD)."""
+    return (date.fromisoformat(data_fim) - date.fromisoformat(data_inicio)).days
 
 
 def process_message(text: str, telegram_id: int, first_name: str) -> list:
@@ -102,8 +112,23 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
             if not transacoes:
                 return [f"Nenhuma transacao encontrada no periodo de {data_inicio} a {data_fim}."]
 
-            relatorio_texto = _build_report(transacoes, data_inicio, data_fim)
             dicas = generate_financial_tips(transacoes)
+
+            # Períodos "de mais de 1 semana" viram PDF; os curtos continuam em texto.
+            if _dias_no_periodo(data_inicio, data_fim) > LIMITE_DIAS_PDF:
+                caminho_pdf = gerar_pdf_relatorio(
+                    transacoes, data_inicio, data_fim, nome_usuario=first_name
+                )
+                return [
+                    {
+                        "tipo": "documento",
+                        "caminho": caminho_pdf,
+                        "legenda": f"Relatorio de {data_inicio} a {data_fim}",
+                    },
+                    f"Dicas financeiras para voce:\n\n{dicas}",
+                ]
+
+            relatorio_texto = _build_report(transacoes, data_inicio, data_fim)
             return [relatorio_texto, f"Dicas financeiras para voce:\n\n{dicas}"]
 
         else:
