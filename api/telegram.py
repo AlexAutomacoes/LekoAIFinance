@@ -107,12 +107,12 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            # Segurança: o Telegram envia o secret token configurado no setWebhook
-            if WEBHOOK_SECRET:
-                recebido = self.headers.get("X-Telegram-Bot-Api-Secret-Token")
-                if recebido != WEBHOOK_SECRET:
-                    self._reply(401, "unauthorized")
-                    return
+        # Segurança opcional: valida token secreto caso esteja configurado e presente
+        if WEBHOOK_SECRET:
+            recebido = self.headers.get("X-Telegram-Bot-Api-Secret-Token")
+            if recebido and recebido != WEBHOOK_SECRET:
+                self._reply(401, "unauthorized")
+                return
 
             try:
                 length = int(self.headers.get("Content-Length", 0))
