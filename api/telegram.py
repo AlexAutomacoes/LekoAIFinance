@@ -40,10 +40,14 @@ def send_document(chat_id: int, file_path: str, caption: str = "") -> None:
     Envia um arquivo (PDF ou Excel) via Telegram Bot API usando multipart/form-data.
     """
     try:
-        logging.info(f"Tentando enviar documento {file_path} para chat_id {chat_id}")
-        mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if file_path.endswith(".xlsx") else "application/pdf"
+        filename = os.path.basename(file_path)
+        is_excel = file_path.endswith(".xlsx")
+        mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if is_excel else "application/pdf"
+        
+        logging.info(f"Tentando enviar documento {filename} ({mime_type}) para chat_id {chat_id}")
+        
         with open(file_path, "rb") as f:
-            files = {"document": (os.path.basename(file_path), f, mime_type)}
+            files = {"document": (filename, f.read(), mime_type)}
             data = {"chat_id": str(chat_id)}
             if caption:
                 data["caption"] = caption
