@@ -9,6 +9,7 @@ dependencies = [
     "groq==1.4.0",
     "fpdf2==2.8.5",
     "httpx",
+    "openpyxl",
 ]
 
 # Nao ha pacote Python para buildar (apenas funcoes serverless + scripts);
