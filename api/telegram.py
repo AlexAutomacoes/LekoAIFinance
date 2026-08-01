@@ -40,15 +40,17 @@ def send_document(chat_id: int, file_path: str, caption: str = "") -> None:
     Envia um arquivo (PDF ou Excel) via Telegram Bot API usando multipart/form-data.
     """
     try:
+        logging.info(f"Tentando enviar documento {file_path} para chat_id {chat_id}")
         mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if file_path.endswith(".xlsx") else "application/pdf"
         with open(file_path, "rb") as f:
             files = {"document": (os.path.basename(file_path), f, mime_type)}
             data = {"chat_id": str(chat_id)}
             if caption:
                 data["caption"] = caption
-            httpx.post(f"{API_BASE}/sendDocument", data=data, files=files, timeout=30)
+            res = httpx.post(f"{API_BASE}/sendDocument", data=data, files=files, timeout=30)
+            logging.info(f"Resposta do sendDocument: status={res.status_code}, body={res.text}")
     except Exception as e:
-        logging.error(f"Falha ao enviar documento ao Telegram: {e}")
+        logging.error(f"Falha ao enviar documento ao Telegram: {e}", exc_info=True)
 
 
 def send_message_with_buttons(chat_id: int, text: str, data_inicio: str, data_fim: str) -> None:
@@ -128,7 +130,10 @@ class handler(BaseHTTPRequestHandler):
 
                 data = cb.get("data", "")
                 user = cb.get("from", {})
-                chat_id = cb.get("message", {}).get("chat", {}).get("id")
+                message_obj = cb.get("message", {})
+                chat_id = message_obj.get("chat", {}).get("id") or user.get("id")
+
+                logging.info(f"Recebido callback_query: data={data}, chat_id={chat_id}")
 
                 if data.startswith("fmt_") and chat_id:
                     partes = data.split("|")
@@ -155,6 +160,7 @@ class handler(BaseHTTPRequestHandler):
 
                 self._reply(200, "ok")
                 return
+
 
             message = update.get("message") or update.get("edited_message")
             if not message or "text" not in message:
