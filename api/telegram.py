@@ -37,14 +37,12 @@ def send_message(chat_id: int, text: str) -> None:
 
 def send_document(chat_id: int, file_path: str, caption: str = "") -> None:
     """
-    Envia um arquivo (ex.: PDF) via Telegram Bot API usando multipart/form-data.
-    O sendMessage usa urlencode (form simples), que não serve para upload de
-    binário — por isso aqui usamos httpx (já disponível no processo via supabase),
-    que monta o multipart com o parâmetro `files`.
+    Envia um arquivo (PDF ou Excel) via Telegram Bot API usando multipart/form-data.
     """
     try:
+        mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if file_path.endswith(".xlsx") else "application/pdf"
         with open(file_path, "rb") as f:
-            files = {"document": (os.path.basename(file_path), f, "application/pdf")}
+            files = {"document": (os.path.basename(file_path), f, mime_type)}
             data = {"chat_id": str(chat_id)}
             if caption:
                 data["caption"] = caption
@@ -106,82 +104,87 @@ class handler(BaseHTTPRequestHandler):
         self._reply(200, "LekoAIFinance webhook ativo.")
 
     def do_POST(self):
-        # Segurança: o Telegram envia o secret token configurado no setWebhook
-        if WEBHOOK_SECRET:
-            recebido = self.headers.get("X-Telegram-Bot-Api-Secret-Token")
-            if recebido != WEBHOOK_SECRET:
-                self._reply(401, "unauthorized")
+        try:
+            # Segurança: o Telegram envia o secret token configurado no setWebhook
+            if WEBHOOK_SECRET:
+                recebido = self.headers.get("X-Telegram-Bot-Api-Secret-Token")
+                if recebido != WEBHOOK_SECRET:
+                    self._reply(401, "unauthorized")
+                    return
+
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length) if length else b"{}"
+                update = json.loads(body)
+            except Exception as e:
+                logging.error(f"Update inválido: {e}")
+                self._reply(200, "ok")  # 200 evita reenvios do Telegram
                 return
 
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length) if length else b"{}"
-            update = json.loads(body)
-        except Exception as e:
-            logging.error(f"Update inválido: {e}")
-            self._reply(200, "ok")  # 200 evita reenvios do Telegram
-            return
+            # Trata clique em botões inline (callback_query)
+            if "callback_query" in update:
+                cb = update["callback_query"]
+                answer_callback_query(cb["id"])
 
-        # Trata clique em botões inline (callback_query)
-        if "callback_query" in update:
-            cb = update["callback_query"]
-            answer_callback_query(cb["id"])
+                data = cb.get("data", "")
+                user = cb.get("from", {})
+                chat_id = cb.get("message", {}).get("chat", {}).get("id")
 
-            data = cb.get("data", "")
-            user = cb.get("from", {})
-            chat_id = cb.get("message", {}).get("chat", {}).get("id")
+                if data.startswith("fmt_") and chat_id:
+                    partes = data.split("|")
+                    formato = "pdf" if partes[0] == "fmt_pdf" else "excel"
+                    data_inicio = partes[1]
+                    data_fim = partes[2]
 
-            if data.startswith("fmt_") and chat_id:
-                partes = data.split("|")
-                formato = "pdf" if partes[0] == "fmt_pdf" else "excel"
-                data_inicio = partes[1]
-                data_fim = partes[2]
+                    from tools.db_manager import get_or_create_user
+                    from tools.message_handler import gerar_relatorio_por_formato
 
-                from tools.db_manager import get_or_create_user
-                from tools.message_handler import gerar_relatorio_por_formato
+                    internal_id = get_or_create_user(telegram_id=user.get("id", chat_id), name=user.get("first_name", ""))
+                    respostas = gerar_relatorio_por_formato(
+                        user_id=internal_id,
+                        first_name=user.get("first_name", ""),
+                        data_inicio=data_inicio,
+                        data_fim=data_fim,
+                        formato=formato,
+                    )
+                    for resposta in respostas:
+                        if isinstance(resposta, dict) and resposta.get("tipo") == "documento":
+                            send_document(chat_id, resposta["caminho"], resposta.get("legenda", ""))
+                        else:
+                            send_message(chat_id, resposta)
 
-                internal_id = get_or_create_user(telegram_id=user.get("id", chat_id), name=user.get("first_name", ""))
-                respostas = gerar_relatorio_por_formato(
-                    user_id=internal_id,
-                    first_name=user.get("first_name", ""),
-                    data_inicio=data_inicio,
-                    data_fim=data_fim,
-                    formato=formato,
-                )
-                for resposta in respostas:
-                    if isinstance(resposta, dict) and resposta.get("tipo") == "documento":
+                self._reply(200, "ok")
+                return
+
+            message = update.get("message") or update.get("edited_message")
+            if not message or "text" not in message:
+                self._reply(200, "ok")  # ignora updates sem texto (stickers, etc.)
+                return
+
+            chat_id = message["chat"]["id"]
+            text = message["text"]
+            user = message.get("from", {})
+            telegram_id = user.get("id", chat_id)
+            first_name = user.get("first_name", "")
+
+            for resposta in process_message(text, telegram_id, first_name):
+                if isinstance(resposta, dict):
+                    tipo = resposta.get("tipo")
+                    if tipo == "documento":
                         send_document(chat_id, resposta["caminho"], resposta.get("legenda", ""))
-                    else:
-                        send_message(chat_id, resposta)
+                    elif tipo == "botoes_formato":
+                        send_message_with_buttons(
+                            chat_id,
+                            resposta["mensagem"],
+                            resposta["data_inicio"],
+                            resposta["data_fim"]
+                        )
+                else:
+                    send_message(chat_id, resposta)
 
             self._reply(200, "ok")
-            return
+        except Exception as err:
+            logging.error(f"Erro inesperado no webhook: {err}", exc_info=True)
+            self._reply(200, "ok")
 
-        message = update.get("message") or update.get("edited_message")
-        if not message or "text" not in message:
-            self._reply(200, "ok")  # ignora updates sem texto (stickers, etc.)
-            return
-
-        chat_id = message["chat"]["id"]
-        text = message["text"]
-        user = message.get("from", {})
-        telegram_id = user.get("id", chat_id)
-        first_name = user.get("first_name", "")
-
-        for resposta in process_message(text, telegram_id, first_name):
-            if isinstance(resposta, dict):
-                tipo = resposta.get("tipo")
-                if tipo == "documento":
-                    send_document(chat_id, resposta["caminho"], resposta.get("legenda", ""))
-                elif tipo == "botoes_formato":
-                    send_message_with_buttons(
-                        chat_id,
-                        resposta["mensagem"],
-                        resposta["data_inicio"],
-                        resposta["data_fim"]
-                    )
-            else:
-                send_message(chat_id, resposta)
-
-        self._reply(200, "ok")
 
