@@ -11,9 +11,37 @@ from datetime import date
 from tools.db_manager import get_or_create_user, insert_transaction, get_transactions
 from tools.llm_router import extract_transaction, generate_financial_tips
 from tools.pdf_report import gerar_pdf_relatorio
+from tools.excel_report import gerar_excel_relatorio
 
-# Acima deste nº de dias, o relatório vira PDF em vez de texto no chat ("mais de 1 semana").
+# Acima deste nº de dias, o relatório vira arquivo (PDF/Excel) em vez de texto no chat ("mais de 1 semana").
 LIMITE_DIAS_PDF = 7
+
+
+def gerar_relatorio_por_formato(user_id: int, first_name: str, data_inicio: str, data_fim: str, formato: str) -> list:
+    """
+    Gera o relatório no formato especificado ('pdf' ou 'excel') para o período.
+    """
+    transacoes = get_transactions(user_id=user_id, data_inicio=data_inicio, data_fim=data_fim)
+    if not transacoes:
+        return [f"Nenhuma transação encontrada no período de {data_inicio} a {data_fim}."]
+
+    dicas = generate_financial_tips(transacoes)
+
+    if formato == "excel":
+        caminho_file = gerar_excel_relatorio(transacoes, data_inicio, data_fim, nome_usuario=first_name)
+        legenda = f"Relatório Excel ({data_inicio} a {data_fim})"
+    else:
+        caminho_file = gerar_pdf_relatorio(transacoes, data_inicio, data_fim, nome_usuario=first_name)
+        legenda = f"Relatório PDF ({data_inicio} a {data_fim})"
+
+    return [
+        {
+            "tipo": "documento",
+            "caminho": caminho_file,
+            "legenda": legenda,
+        },
+        f"Dicas financeiras para você:\n\n{dicas}",
+    ]
 
 
 def _build_welcome(name: str, internal_id: int) -> str:
@@ -63,10 +91,7 @@ def _dias_no_periodo(data_inicio: str, data_fim: str) -> int:
 
 def process_message(text: str, telegram_id: int, first_name: str) -> list:
     """
-    Roteia uma mensagem do usuário e retorna a lista de respostas (strings) a enviar.
-
-    Trata o comando /start, a árvore de decisão da IA (conversar, pedir_dados,
-    pedir_periodo, registrar, relatorio) e captura erros devolvendo uma mensagem amigável.
+    Roteia uma mensagem do usuário e retorna a lista de respostas (strings ou objetos de controle) a enviar.
     """
     try:
         internal_id = get_or_create_user(telegram_id=telegram_id, name=first_name)
@@ -100,6 +125,7 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
             periodo = dados.get("periodo", {})
             data_inicio = periodo.get("data_inicio")
             data_fim = periodo.get("data_fim")
+            formato = dados.get("formato", "opcao")
 
             if not data_inicio or not data_fim:
                 return ["Nao consegui identificar o periodo. Por favor, me diga a data de "
@@ -112,22 +138,22 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
             if not transacoes:
                 return [f"Nenhuma transacao encontrada no periodo de {data_inicio} a {data_fim}."]
 
-            dicas = generate_financial_tips(transacoes)
-
-            # Períodos "de mais de 1 semana" viram PDF; os curtos continuam em texto.
+            # Períodos "de mais de 1 semana": oferece botões de escolha de formato ou gera o formato escolhido
             if _dias_no_periodo(data_inicio, data_fim) > LIMITE_DIAS_PDF:
-                caminho_pdf = gerar_pdf_relatorio(
-                    transacoes, data_inicio, data_fim, nome_usuario=first_name
-                )
+                if formato in ["pdf", "excel"]:
+                    return gerar_relatorio_por_formato(internal_id, first_name, data_inicio, data_fim, formato)
+
+                # Se não especificou formato, retorna o marcador para renderizar os botões Inline no Telegram
                 return [
                     {
-                        "tipo": "documento",
-                        "caminho": caminho_pdf,
-                        "legenda": f"Relatorio de {data_inicio} a {data_fim}",
-                    },
-                    f"Dicas financeiras para voce:\n\n{dicas}",
+                        "tipo": "botoes_formato",
+                        "mensagem": f"Escolha o formato em que deseja receber o relatório do período ({data_inicio} a {data_fim}):",
+                        "data_inicio": data_inicio,
+                        "data_fim": data_fim,
+                    }
                 ]
 
+            dicas = generate_financial_tips(transacoes)
             relatorio_texto = _build_report(transacoes, data_inicio, data_fim)
             return [relatorio_texto, f"Dicas financeiras para voce:\n\n{dicas}"]
 

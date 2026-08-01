@@ -69,13 +69,15 @@ Retorne:
 }}
 
 AÇÃO 5: "relatorio"
-Se o usuário pedir um relatório/extrato/resumo E informar uma data ou período específico (ex: "relatório de junho", "extrato do dia 10 ao dia 13", "gastos de hoje", "último mês").
+Se o usuário pedir um relatório/extrato/resumo E informar uma data ou período específico (ex: "relatório de junho", "extrato em excel do dia 10 ao dia 13", "gastos de hoje em pdf").
 Interprete a data/período mencionado e converta para datas no formato YYYY-MM-DD.
+Se o usuário mencionou explicitamente "pdf" ou "excel" na mensagem, defina o campo "formato" como "pdf" ou "excel". Caso contrário, defina "formato" como "opcao".
 "Hoje" = {hoje}. "Último dia" = ontem. "Este mês" = do dia 01 do mês atual até hoje. "Último mês" = do dia 01 ao último dia do mês anterior.
 Retorne:
 {{
   "acao": "relatorio",
   "mensagem": "Mensagem informando que está gerando o relatório.",
+  "formato": "pdf" | "excel" | "opcao",
   "periodo": {{
       "data_inicio": "YYYY-MM-DD",
       "data_fim": "YYYY-MM-DD"
