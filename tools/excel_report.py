@@ -13,9 +13,6 @@ import os
 import tempfile
 from collections import defaultdict
 from datetime import datetime
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 
 
 def _agrupar_por_categoria(transacoes: list) -> dict:
@@ -33,7 +30,12 @@ def gerar_excel_relatorio(transacoes: list, data_inicio: str, data_fim: str, nom
     """
     Gera o arquivo Excel (.xlsx) do relatório financeiro e retorna o caminho do arquivo criado.
     """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
     total_entradas = sum(t["valor"] for t in transacoes if t["status"] == "Entrada")
+
     total_saidas = sum(abs(t["valor"]) for t in transacoes if t["status"] == "Saída")
     saldo = total_entradas - total_saidas
 

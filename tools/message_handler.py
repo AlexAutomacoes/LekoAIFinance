@@ -11,7 +11,6 @@ from datetime import date
 from tools.db_manager import get_or_create_user, insert_transaction, get_transactions
 from tools.llm_router import extract_transaction, generate_financial_tips
 from tools.pdf_report import gerar_pdf_relatorio
-from tools.excel_report import gerar_excel_relatorio
 
 # Acima deste nº de dias, o relatório vira arquivo (PDF/Excel) em vez de texto no chat ("mais de 1 semana").
 LIMITE_DIAS_PDF = 7
@@ -28,11 +27,13 @@ def gerar_relatorio_por_formato(user_id: int, first_name: str, data_inicio: str,
     dicas = generate_financial_tips(transacoes)
 
     if formato == "excel":
+        from tools.excel_report import gerar_excel_relatorio
         caminho_file = gerar_excel_relatorio(transacoes, data_inicio, data_fim, nome_usuario=first_name)
         legenda = f"Relatório Excel ({data_inicio} a {data_fim})"
     else:
         caminho_file = gerar_pdf_relatorio(transacoes, data_inicio, data_fim, nome_usuario=first_name)
         legenda = f"Relatório PDF ({data_inicio} a {data_fim})"
+
 
     return [
         {
