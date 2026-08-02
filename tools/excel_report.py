@@ -13,6 +13,7 @@ import os
 import tempfile
 from collections import defaultdict
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 def _agrupar_por_categoria(transacoes: list) -> dict:
@@ -162,7 +163,7 @@ def gerar_excel_relatorio(transacoes: list, data_inicio: str, data_fim: str, nom
             ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
 
     # Gravar arquivo temporário
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    timestamp = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y%m%d%H%M%S")
     caminho = os.path.join(tempfile.gettempdir(), f"relatorio_{timestamp}.xlsx")
     wb.save(caminho)
     return caminho

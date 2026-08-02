@@ -3,6 +3,7 @@ import json
 from dotenv import load_dotenv
 from groq import Groq
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 load_dotenv()
 
@@ -20,7 +21,7 @@ def extract_transaction(text: str) -> dict:
     Suporta 5 ações: conversar, pedir_dados, registrar, pedir_periodo, relatorio.
     """
     client = _get_client()
-    hoje = datetime.now().strftime("%Y-%m-%d")
+    hoje = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m-%d")
     
     system_prompt = f"""Você é o LekoAIFinance, um assistente financeiro inteligente e consultor.
 Sua função é interpretar a mensagem do usuário e retornar APENAS um objeto JSON. Você tem 5 ações possíveis:

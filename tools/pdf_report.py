@@ -15,6 +15,7 @@ import os
 import tempfile
 from collections import defaultdict
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fpdf import FPDF, XPos, YPos
 
@@ -134,7 +135,7 @@ def gerar_pdf_relatorio(transacoes: list, data_inicio: str, data_fim: str,
                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     # --- Grava no diretório temporário do SO (/tmp na Vercel, temp no Windows) ---
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    timestamp = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y%m%d%H%M%S")
     caminho = os.path.join(tempfile.gettempdir(), f"relatorio_{timestamp}.pdf")
     pdf.output(caminho)
     return caminho
