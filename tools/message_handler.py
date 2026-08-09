@@ -54,33 +54,63 @@ def _build_welcome(name: str, internal_id: int) -> str:
     )
 
 
+def _fmt_moeda(valor: float) -> str:
+    """Formata um valor numérico no padrão brasileiro. Ex.: 1234.5 -> '1.234,50' (sem o 'R$')."""
+    s = f"{abs(valor):,.2f}"  # padrão en-US: '1,234.50'
+    # inverte os separadores: '.' <-> ',' para o padrão pt-BR
+    return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _fmt_data(data_iso: str) -> str:
+    """Converte 'YYYY-MM-DD' para 'DD/MM/AAAA'. Se falhar, devolve o valor original."""
+    try:
+        return date.fromisoformat(data_iso).strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        return str(data_iso)
+
+
 def _build_report(transacoes: list, data_inicio: str, data_fim: str) -> str:
     total_entradas = sum(t["valor"] for t in transacoes if t["status"] == "Entrada")
     total_saidas = sum(t["valor"] for t in transacoes if t["status"] == "Saída")
     saldo = total_entradas + total_saidas  # saídas já são negativas
 
-    linhas = [f"Relatorio Financeiro ({data_inicio} a {data_fim})\n"]
+    def _linha(t: dict) -> str:
+        linha = f"• R$ {_fmt_moeda(t['valor'])} — {t['categoria']}"
+        descricao = (t.get("descricao") or "").strip()
+        if descricao and descricao.lower() != str(t["categoria"]).lower():
+            linha += f" ({descricao})"
+        return f"{linha} · {_fmt_data(t['data'])}"
 
-    linhas.append("--- ENTRADAS ---")
+    linhas = [
+        "📊 Relatório Financeiro",
+        f"🗓️ {_fmt_data(data_inicio)} a {_fmt_data(data_fim)}",
+        "",
+        "⬆️ ENTRADAS",
+    ]
+
     entradas = [t for t in transacoes if t["status"] == "Entrada"]
     if entradas:
-        for t in entradas:
-            linhas.append(f"  + R$ {abs(t['valor']):.2f} | {t['categoria']} - {t['descricao']} ({t['data']})")
+        linhas += [_linha(t) for t in entradas]
     else:
-        linhas.append("  Nenhuma entrada no periodo.")
+        linhas.append("• Nenhuma entrada no período.")
 
-    linhas.append("\n--- SAIDAS ---")
+    linhas += ["", "⬇️ SAÍDAS"]
     saidas = [t for t in transacoes if t["status"] == "Saída"]
     if saidas:
-        for t in saidas:
-            linhas.append(f"  - R$ {abs(t['valor']):.2f} | {t['categoria']} - {t['descricao']} ({t['data']})")
+        linhas += [_linha(t) for t in saidas]
     else:
-        linhas.append("  Nenhuma saida no periodo.")
+        linhas.append("• Nenhuma saída no período.")
 
-    linhas.append(f"\n--- RESUMO ---")
-    linhas.append(f"  Total Entradas: R$ {abs(total_entradas):.2f}")
-    linhas.append(f"  Total Saidas:   R$ {abs(total_saidas):.2f}")
-    linhas.append(f"  Saldo:          R$ {saldo:.2f}")
+    indicador = "🟢" if saldo >= 0 else "🔴"
+    sinal = "-" if saldo < 0 else ""
+    linhas += [
+        "",
+        "━━━━━━━━━━━━━━━",
+        "💰 Resumo",
+        f"• Entradas: R$ {_fmt_moeda(total_entradas)}",
+        f"• Saídas: R$ {_fmt_moeda(total_saidas)}",
+        f"{indicador} Saldo: {sinal}R$ {_fmt_moeda(saldo)}",
+    ]
 
     return "\n".join(linhas)
 
