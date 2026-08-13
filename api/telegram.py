@@ -111,9 +111,9 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            # Segurança opcional: valida token secreto apenas se o header estiver presente e não bater
-            if WEBHOOK_SECRET and "X-Telegram-Bot-Api-Secret-Token" in self.headers:
-                recebido = self.headers.get("X-Telegram-Bot-Api-Secret-Token")
+            # Segurança: se o WEBHOOK_SECRET estiver configurado, SEMPRE exigir o header correto.
+            if WEBHOOK_SECRET:
+                recebido = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
                 if recebido != WEBHOOK_SECRET:
                     self._reply(401, "unauthorized")
                     return
