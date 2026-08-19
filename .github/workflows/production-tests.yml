@@ -23,7 +23,7 @@ jobs:
       - name: Run production tests
         id: tests
         env:
-          DASHBOARD_API: https://leko-ai-finance-ruddy.vercel.app/api/dashboard
+          DASHBOARD_API: https://leko-ai-finance-ruddy.vercel.app/api/chamados
           DASHBOARD_TOKEN: ${{ secrets.DASHBOARD_TOKEN }}
         run: |
           python << 'EOF'

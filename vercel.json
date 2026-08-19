@@ -1,6 +1,14 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
-    { "source": "/dashboard", "destination": "/public/dashboard.html" }
-  ]
+    { "source": "/dashboard", "destination": "/dashboard.html" }
+  ],
+  "functions": {
+    "api/dashboard.py": {
+      "maxDuration": 10
+    },
+    "api/telegram.py": {
+      "maxDuration": 10
+    }
+  }
 }
