@@ -12,7 +12,7 @@ Este arquivo documenta o que foi feito, erros encontrados, testes e resultados.
 - **12/06/2026:**
   - Implementação da Camada 2 (Inteligência Artificial) finalizada.
   - Selecionado e integrado o provedor **Groq** via API.
-  - Substituição de modelo descontinuado pelo mais recente (`llama-3.3-70b-versatile`).
+  - Modelo da Groq centralizado na constante `GROQ_MODEL` (env var), hoje `openai/gpt-oss-120b`. Já houve duas descontinuações pela Groq: `llama3-8b-8192` → `llama-3.3-70b-versatile` → `openai/gpt-oss-120b`.
   - Lógica do `llm_router.py` refatorada para suportar um formato de UX conversacional estrito com 3 ações (`conversar`, `pedir_dados`, `registrar`).
   - Injeção obrigatória do JSON Mode habilitada na Groq para blindagem contra erros de Parse/Markdown.
   - `telegram_bot.py` atualizado para gerenciar a árvore de decisão retornada pela IA e tratar envio do template dinâmico ao usuário.

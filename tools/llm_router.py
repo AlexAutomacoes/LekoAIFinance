@@ -9,6 +9,10 @@ load_dotenv()
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
+# Modelo da Groq usado em todas as chamadas. Centralizado aqui para facilitar troca
+# quando a Groq descontinua um modelo (ex.: o antigo "llama-3.3-70b-versatile" foi removido).
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+
 def _get_client():
     """Retorna uma instância do cliente Groq."""
     if not GROQ_API_KEY:
@@ -122,7 +126,7 @@ Referências: "hoje" = {hoje}; "ontem"/"último dia" = o dia anterior; "este mê
                 "content": text,
             }
         ],
-        model="llama-3.3-70b-versatile",
+        model=GROQ_MODEL,
         temperature=0.0,
         response_format={"type": "json_object"}
     )
@@ -176,7 +180,7 @@ Responda em texto simples, NÃO retorne JSON."""
                 "content": f"Aqui estão as transações do usuário para análise:\n{dados_texto}",
             }
         ],
-        model="llama-3.3-70b-versatile",
+        model=GROQ_MODEL,
         temperature=0.7,
     )
     

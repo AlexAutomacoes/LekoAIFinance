@@ -1,4 +1,4 @@
-# POP — Camada 2: Roteamento por IA (Groq / Llama 3.3)
+# POP — Camada 2: Roteamento por IA (Groq)
 
 **Arquivo:** [`tools/llm_router.py`](../tools/llm_router.py)
 **Camada:** 2 (Navegação) — interpreta intenção e extrai dados. **Não** persiste nada.
@@ -12,7 +12,8 @@ interpretação — toda persistência é determinística (Camada 3).
 ## Provedor e modelo
 
 - **Provedor:** Groq (`GROQ_API_KEY` no `.env`).
-- **Modelo:** `llama-3.3-70b-versatile`.
+- **Modelo:** constante `GROQ_MODEL` (env var `GROQ_MODEL`, padrão `openai/gpt-oss-120b`).
+  Centralizado num único ponto para facilitar a troca quando a Groq descontinua um modelo.
 - **Cliente:** criado sob demanda em `_get_client()` (lança exceção se faltar a chave).
 
 ## Função `extract_transaction(text) -> dict`
@@ -43,7 +44,9 @@ interpretação — toda persistência é determinística (Camada 3).
 - **`GROQ_API_KEY` ausente** → `_get_client()` lança exceção (capturada na Camada 3).
 - **JSON inválido** em `extract_transaction` → lança
   `"A IA não retornou um JSON válido: ..."`. (Mitigado pelo JSON Mode.)
-- **Modelo descontinuado** → a Groq retorna `400 model_decommissioned`.
-  > Aprendizado: o modelo original `llama3-8b-8192` foi descomissionado e quebrava **todas**
-  > as mensagens. Substituído por `llama-3.3-70b-versatile`. Ao ver erro 400 da Groq,
-  > consulte https://console.groq.com/docs/deprecations e atualize o `model=`.
+- **Modelo descontinuado** → a Groq retorna `400 model_decommissioned` ou `404 model_not_found`.
+  > Aprendizado: já quebrou **todas** as mensagens duas vezes. Ordem das descontinuações:
+  > `llama3-8b-8192` → `llama-3.3-70b-versatile` → `openai/gpt-oss-120b`. Ao ver 400/404 da Groq,
+  > liste os modelos válidos da conta com `client.models.list()`, escolha um capaz de JSON Mode e
+  > atualize a env var `GROQ_MODEL` (ou o padrão em `llm_router.py`).
+  > Referência: https://console.groq.com/docs/deprecations

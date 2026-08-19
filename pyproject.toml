@@ -10,6 +10,7 @@ dependencies = [
     "fpdf2==2.8.5",
     "httpx",
     "openpyxl",
+    "tzdata",
 ]
 
 # Nao ha pacote Python para buildar (apenas funcoes serverless + scripts);

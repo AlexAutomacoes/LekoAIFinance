@@ -34,7 +34,7 @@ para interpretar intenção; o armazenamento e a comunicação são determiníst
 
 - **Python 3** (ambiente virtual `.venv`)
 - [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) `22.7`
-- [Groq](https://groq.com/) — modelo `llama-3.3-70b-versatile` (Camada 2)
+- [Groq](https://groq.com/) — modelo `openai/gpt-oss-120b` (Camada 2; configurável via `GROQ_MODEL`)
 - [Supabase](https://supabase.com/) — banco de dados em nuvem (Fonte da Verdade)
 - `python-dotenv` para variáveis de ambiente
 
