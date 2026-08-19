@@ -1,0 +1,258 @@
+name: LekoAI Production Tests
+
+on:
+  schedule:
+    # Roda todo dia as 10h BRT (13h UTC)
+    - cron: '0 13 * * *'
+  workflow_dispatch:
+    # Permite rodar manualmente pela aba Actions
+
+jobs:
+  test-production:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install httpx
+
+      - name: Run production tests
+        id: tests
+        env:
+          DASHBOARD_API: https://leko-ai-finance-ruddy.vercel.app/api/dashboard
+          DASHBOARD_TOKEN: ${{ secrets.DASHBOARD_TOKEN }}
+        run: |
+          python << 'EOF'
+          import time
+          import json
+          import os
+          import httpx
+          from datetime import datetime, timezone
+
+          WEBHOOK_URL = "https://leko-ai-finance-ruddy.vercel.app/api/telegram"
+          DASHBOARD_API = os.environ.get("DASHBOARD_API", "")
+          DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "")
+          LATENCY_THRESHOLD_MS = 3000
+
+          def now_iso():
+              return datetime.now(timezone.utc).isoformat()
+
+          def post_chamado(chamado):
+              """Envia chamado para o dashboard na nuvem."""
+              if not DASHBOARD_API:
+                  return
+              try:
+                  headers = {"Content-Type": "application/json"}
+                  if DASHBOARD_TOKEN:
+                      headers["Authorization"] = f"Bearer {DASHBOARD_TOKEN}"
+                  httpx.post(DASHBOARD_API, json=chamado, headers=headers, timeout=10)
+              except Exception as e:
+                  print(f"  [WARN] Dashboard post failed: {e}")
+
+          def run_test(client, name, method, url, **kwargs):
+              start = time.perf_counter()
+              try:
+                  if method == "GET":
+                      resp = client.get(url, timeout=15)
+                  else:
+                      resp = client.post(url, timeout=15, **kwargs)
+                  ms = (time.perf_counter() - start) * 1000
+                  return {
+                      "name": name,
+                      "status_code": resp.status_code,
+                      "latency_ms": round(ms, 1),
+                      "success": resp.status_code == 200,
+                      "body": resp.text[:200],
+                  }
+              except Exception as e:
+                  ms = (time.perf_counter() - start) * 1000
+                  return {
+                      "name": name,
+                      "status_code": 0,
+                      "latency_ms": round(ms, 1),
+                      "success": False,
+                      "body": str(e)[:200],
+                  }
+
+          results = []
+          errors = []
+          high_latency = []
+
+          print("\n  === LekoAI Production Tests (GitHub Actions) ===\n")
+
+          with httpx.Client() as client:
+              # 1. Health Check (GET)
+              r = run_test(client, "health_check", "GET", WEBHOOK_URL)
+              results.append(r)
+              if not r["success"] or "webhook ativo" not in r["body"].lower():
+                  errors.append(r)
+              print(f"  [{'OK' if r['success'] else 'FAIL'}] health_check - {r['latency_ms']:.0f}ms")
+
+              # 2. Seguranca - POST sem secret (deve retornar 401)
+              r = run_test(client, "seguranca_sem_secret", "POST", WEBHOOK_URL,
+                           json={}, headers={"Content-Type": "application/json"})
+              results.append(r)
+              if r["status_code"] == 401:
+                  r["success"] = True
+              else:
+                  errors.append(r)
+              print(f"  [{'OK' if r['success'] else 'FAIL'}] seguranca_sem_secret - {r['latency_ms']:.0f}ms (401=OK)")
+
+              # 3. Seguranca - POST com payload sem auth
+              r = run_test(client, "seguranca_payload_sem_auth", "POST", WEBHOOK_URL,
+                           json={"update_id": int(time.time()), "message": {
+                               "message_id": 1,
+                               "from": {"id": 99999, "is_bot": False, "first_name": "CI"},
+                               "chat": {"id": 99999, "type": "private"},
+                               "date": int(time.time()),
+                           }},
+                           headers={"Content-Type": "application/json"})
+              results.append(r)
+              if r["status_code"] == 401:
+                  r["success"] = True
+              else:
+                  errors.append(r)
+              print(f"  [{'OK' if r['success'] else 'FAIL'}] seguranca_payload_sem_auth - {r['latency_ms']:.0f}ms (401=OK)")
+
+              # 4-6. Latency checks (3x GET)
+              for i in range(3):
+                  r = run_test(client, f"latencia_check_{i+1}", "GET", WEBHOOK_URL)
+                  results.append(r)
+                  if not r["success"]:
+                      errors.append(r)
+                  if r["success"] and r["latency_ms"] > LATENCY_THRESHOLD_MS:
+                      high_latency.append(r)
+                  print(f"  [{'OK' if r['success'] else 'FAIL'}] latencia_check_{i+1} - {r['latency_ms']:.0f}ms")
+
+          # Summary
+          total = len(results)
+          passed = sum(1 for r in results if r["success"])
+          avg_lat = sum(r["latency_ms"] for r in results) / total if total else 0
+
+          print(f"\n{'='*50}")
+          print(f"  RESULTADO: {passed}/{total} OK")
+          print(f"  Latencia media: {avg_lat:.0f}ms")
+          print(f"  Erros: {len(errors)}")
+          print(f"  Latencia alta (>{LATENCY_THRESHOLD_MS}ms): {len(high_latency)}")
+          print(f"{'='*50}\n")
+
+          # Post results to cloud dashboard
+          print("  Enviando resultados ao dashboard...")
+
+          for err in errors:
+              post_chamado({
+                  "type": "erro",
+                  "title": f"Falha: {err['name']}",
+                  "description": f"Status {err['status_code']}.\nResposta: {err['body']}",
+                  "test_name": err["name"],
+                  "latency_ms": err["latency_ms"],
+                  "status": "aberto",
+                  "timestamp": now_iso(),
+              })
+
+          for r in results:
+              if r["success"] and r["latency_ms"] > LATENCY_THRESHOLD_MS:
+                  post_chamado({
+                      "type": "latencia",
+                      "title": f"Latencia alta: {r['name']} ({r['latency_ms']:.0f}ms)",
+                      "description": f"Tempo: {r['latency_ms']:.0f}ms > limite de {LATENCY_THRESHOLD_MS}ms",
+                      "test_name": r["name"],
+                      "latency_ms": r["latency_ms"],
+                      "status": "aberto",
+                      "timestamp": now_iso(),
+                  })
+
+          post_chamado({
+              "type": "status",
+              "title": f"Bateria: {passed}/{total} OK | {avg_lat:.0f}ms",
+              "description": (
+                  f"Testes: {passed}/{total} passaram\n"
+                  f"Latencia media: {avg_lat:.0f}ms\n"
+                  f"Erros: {len(errors)}\n"
+                  f"Latencia alta: {len(high_latency)}\n\n"
+                  f"Detalhes:\n" +
+                  "\n".join(f"  {'OK' if r['success'] else 'FAIL'} {r['name']} - {r['latency_ms']:.0f}ms" for r in results)
+              ),
+              "test_name": "bateria_completa",
+              "latency_ms": avg_lat,
+              "status": "aberto",
+              "timestamp": now_iso(),
+          })
+
+          print("  Resultados enviados ao dashboard.\n")
+
+          # Write outputs for GitHub Actions
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"passed={passed}\n")
+              f.write(f"total={total}\n")
+              f.write(f"errors={len(errors)}\n")
+              f.write(f"avg_latency={avg_lat:.0f}\n")
+              f.write(f"status={'success' if len(errors) == 0 else 'failure'}\n")
+
+          # Exit with error if tests failed
+          if errors:
+              exit(1)
+          EOF
+
+      - name: Create Issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `🔴 Testes de Produção Falharam (${new Date().toLocaleDateString('pt-BR')})`;
+            const errors = '${{ steps.tests.outputs.errors }}';
+            const passed = '${{ steps.tests.outputs.passed }}';
+            const total = '${{ steps.tests.outputs.total }}';
+            const avgLatency = '${{ steps.tests.outputs.avg_latency }}';
+            
+            const body = [
+              `## 🧪 Bateria de Testes - Falha Detectada`,
+              ``,
+              `| Metrica | Valor |`,
+              `|---------|-------|`,
+              `| Testes OK | ${passed}/${total} |`,
+              `| Erros | ${errors} |`,
+              `| Latencia media | ${avgLatency}ms |`,
+              `| Data | ${new Date().toLocaleString('pt-BR', {timeZone: 'America/Sao_Paulo'})} |`,
+              ``,
+              `### Links`,
+              `- [Ver log completo](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              `- [Dashboard](https://leko-ai-finance-ruddy.vercel.app/dashboard)`,
+              ``,
+              `---`,
+              `_Gerado automaticamente por GitHub Actions_`,
+            ].join('\n');
+
+            // Check for existing open issue from today
+            const today = new Date().toISOString().split('T')[0];
+            const existingIssues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'test-failure',
+              state: 'open',
+            });
+
+            const todayIssue = existingIssues.data.find(i => 
+              i.created_at.startsWith(today)
+            );
+
+            if (todayIssue) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: todayIssue.number,
+                body: `### Atualização\n\n${body}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['test-failure', 'automated'],
+              });
+            }
