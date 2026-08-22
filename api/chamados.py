@@ -1,8 +1,8 @@
 """
 API Serverless - Dashboard de Chamados (Vercel)
 Endpoints:
-  GET  /api/dashboard  → lista chamados (query: type, status, limit, offset)
-  POST /api/dashboard  → cria chamado
+  GET  /api/chamados  → lista chamados (query: type, status, limit, offset)
+  POST /api/chamados  → cria chamado
   PATCH via POST com _method=PATCH e id no body → atualiza status
   DELETE via POST com _method=DELETE e id no body → remove chamado
 """

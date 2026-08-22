@@ -4,7 +4,7 @@
     { "source": "/dashboard", "destination": "/dashboard.html" }
   ],
   "functions": {
-    "api/dashboard.py": {
+    "api/chamados.py": {
       "maxDuration": 10
     },
     "api/telegram.py": {
