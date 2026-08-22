@@ -105,11 +105,63 @@ class handler(BaseHTTPRequestHandler):
         if body:
             self.wfile.write(body.encode("utf-8"))
 
+    # ----- Dispatcher: rotas /api/chamados* vao para o servico de chamados -----
+    def _is_chamados(self) -> bool:
+        return urllib.parse.urlparse(self.path).path.startswith("/api/chamados")
+
+    def _reply_json(self, status: int, body) -> None:
+        self.send_response(status)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body, ensure_ascii=False, default=str).encode("utf-8"))
+
+    def do_OPTIONS(self):
+        # Preflight CORS (usado apenas pelas rotas de chamados)
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
+
+    def _chamados_get(self):
+        from tools import chamados_service
+        parsed = urllib.parse.urlparse(self.path)
+        params = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
+        if params.get("action") == "stats":
+            status, body = chamados_service.stats()
+        else:
+            status, body = chamados_service.list_chamados(params)
+        self._reply_json(status, body)
+
+    def _chamados_post(self):
+        from tools import chamados_service
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+        except Exception as e:
+            return self._reply_json(400, {"error": f"JSON invalido: {e}"})
+
+        method = str(body.pop("_method", "POST")).upper()
+        if method == "PATCH":
+            status, resp = chamados_service.patch(self.headers, body)
+        elif method == "DELETE":
+            status, resp = chamados_service.delete(self.headers, body)
+        else:
+            status, resp = chamados_service.create(self.headers, body)
+        self._reply_json(status, resp)
+
     def do_GET(self):
+        if self._is_chamados():
+            return self._chamados_get()
         # Healthcheck simples (útil para verificar o deploy no navegador)
         self._reply(200, "LekoAIFinance webhook ativo.")
 
     def do_POST(self):
+        if self._is_chamados():
+            return self._chamados_post()
         try:
             # Segurança: se o WEBHOOK_SECRET estiver configurado, SEMPRE exigir o header correto.
             if WEBHOOK_SECRET:

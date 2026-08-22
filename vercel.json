@@ -4,9 +4,6 @@
     { "source": "/dashboard", "destination": "/dashboard.html" }
   ],
   "functions": {
-    "api/dashboard.py": {
-      "maxDuration": 10
-    },
     "api/telegram.py": {
       "maxDuration": 10
     }
