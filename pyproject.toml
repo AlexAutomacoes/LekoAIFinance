@@ -17,6 +17,3 @@ dependencies = [
 # impede o uv de tentar instalar o proprio projeto como um pacote.
 [tool.uv]
 package = false
-
-[tool.vercel]
-entrypoint = "api.telegram:handler"
