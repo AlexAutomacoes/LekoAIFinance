@@ -17,3 +17,10 @@ dependencies = [
 # impede o uv de tentar instalar o proprio projeto como um pacote.
 [tool.uv]
 package = false
+
+# A Vercel (runtime Python atual) exige UM entrypoint explicito. Como so pode
+# haver um, api/telegram.py e o entrypoint unico e despacha internamente:
+#   /api/chamados*  -> servico de chamados (tools/chamados_service.py)
+#   restante        -> webhook do Telegram
+[tool.vercel]
+entrypoint = "api.telegram:handler"
