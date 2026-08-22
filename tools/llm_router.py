@@ -1,5 +1,6 @@
 import os
 import json
+from collections import defaultdict
 from dotenv import load_dotenv
 from groq import Groq
 from datetime import datetime
@@ -140,18 +141,79 @@ Referências: "hoje" = {hoje}; "ontem"/"último dia" = o dia anterior; "este mê
         raise Exception(f"A IA não retornou um JSON válido: {result}")
 
 
+def _resumir_transacoes(transactions: list) -> str:
+    """
+    Condensa a lista de transações num resumo agregado (JSON) para o LLM analisar.
+
+    Por que isso existe: antes mandávamos TODAS as transações em JSON para a IA
+    gerar as dicas. Em períodos longos (ex.: 6 meses) isso virava dezenas de
+    milhares de tokens, a chamada demorava vários segundos e a função da Vercel
+    estourava o limite de 10s (erro 504 / FUNCTION_INVOCATION_TIMEOUT).
+
+    O resumo abaixo tem tamanho ~constante (depende só do nº de categorias, não
+    do nº de transações), então a latência para de crescer com o período — a IA
+    continua com dados reais suficientes para dar dicas úteis.
+
+    Convenção de sinal (igual ao resto do app): entradas têm `valor` positivo e
+    saídas negativo — por isso usamos abs() nas saídas.
+    """
+    total_entradas = sum(t["valor"] for t in transactions if t["status"] == "Entrada")
+    total_saidas = sum(abs(t["valor"]) for t in transactions if t["status"] == "Saída")
+    saldo = total_entradas - total_saidas
+
+    por_categoria = defaultdict(lambda: {"entradas": 0.0, "saidas": 0.0})
+    for t in transactions:
+        categoria = (t.get("categoria") or "").strip() or "Sem categoria"
+        if t["status"] == "Entrada":
+            por_categoria[categoria]["entradas"] += t["valor"]
+        else:
+            por_categoria[categoria]["saidas"] += abs(t["valor"])
+
+    # As 5 maiores saídas, para a IA poder comentar gastos específicos sem
+    # precisar da lista inteira.
+    maiores_saidas = sorted(
+        (t for t in transactions if t["status"] == "Saída"),
+        key=lambda t: abs(t["valor"]),
+        reverse=True,
+    )[:5]
+
+    resumo = {
+        "total_transacoes": len(transactions),
+        "total_entradas": round(total_entradas, 2),
+        "total_saidas": round(total_saidas, 2),
+        "saldo": round(saldo, 2),
+        "por_categoria": {
+            cat: {"entradas": round(v["entradas"], 2), "saidas": round(v["saidas"], 2)}
+            for cat, v in sorted(por_categoria.items())
+        },
+        "maiores_saidas": [
+            {
+                "categoria": (t.get("categoria") or "").strip() or "Sem categoria",
+                "descricao": (t.get("descricao") or "").strip(),
+                "valor": round(abs(t["valor"]), 2),
+            }
+            for t in maiores_saidas
+        ],
+    }
+    return json.dumps(resumo, ensure_ascii=False, indent=2)
+
+
 def generate_financial_tips(transactions: list) -> str:
     """
     Recebe a lista de transações do período e usa a IA para gerar dicas financeiras
     personalizadas com base nos dados reais do usuário (RAG).
+
+    Nota: a lista é agregada em um resumo (`_resumir_transacoes`) antes de ir para
+    o LLM, para o prompt não crescer com o tamanho do período (ver a docstring da
+    função para o contexto do timeout na Vercel).
     """
     client = _get_client()
-    
-    # Monta o contexto dos dados para a IA analisar
-    dados_texto = json.dumps(transactions, ensure_ascii=False, indent=2)
-    
+
+    # Monta o contexto (resumo agregado) para a IA analisar
+    dados_texto = _resumir_transacoes(transactions)
+
     system_prompt = """Você é o LekoAIFinance, um consultor de educação financeira direto, prático e acolhedor.
-Você vai receber, em JSON, as transações reais de um período do usuário. Analise APENAS esses dados.
+Você vai receber, em JSON, um RESUMO AGREGADO das transações reais de um período do usuário (totais de entradas/saídas, saldo, somatório por categoria e as maiores saídas). Analise APENAS esses dados.
 
 Sua tarefa: escrever EXATAMENTE 3 dicas curtas (1 linha cada), práticas e baseadas nos números reais recebidos.
 
@@ -177,7 +239,7 @@ Responda em texto simples, NÃO retorne JSON."""
             },
             {
                 "role": "user",
-                "content": f"Aqui estão as transações do usuário para análise:\n{dados_texto}",
+                "content": f"Aqui está o resumo financeiro do período para análise:\n{dados_texto}",
             }
         ],
         model=GROQ_MODEL,
