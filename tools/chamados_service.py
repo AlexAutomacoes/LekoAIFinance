@@ -10,6 +10,7 @@ Tabela Supabase: "chamados".
 """
 import os
 import logging
+import secrets
 
 from supabase import create_client
 
@@ -31,11 +32,24 @@ def _client():
 
 
 def auth_ok(headers) -> bool:
-    """True se a requisição pode escrever. Sem token configurado, libera (dev)."""
+    """
+    True se a requisição pode escrever.
+
+    Falha FECHADA de propósito: sem `DASHBOARD_TOKEN` no ambiente, nega. O
+    comportamento anterior era o inverso (liberava quando a variável estava
+    vazia), o que deixava /api/chamados aceitando create/patch/delete de
+    qualquer origem sempre que a variável não estivesse configurada — e ela não
+    estava no .env local. Validação ausente tem que significar "nega", nunca
+    "libera".
+    """
     if not DASHBOARD_TOKEN:
-        return True
-    token = headers.get("Authorization", "").replace("Bearer ", "")
-    return token == DASHBOARD_TOKEN
+        logging.error("DASHBOARD_TOKEN nao configurado: escrita em chamados negada.")
+        return False
+
+    header = headers.get("Authorization", "")
+    token = header[7:] if header.startswith("Bearer ") else header
+    # compare_digest em vez de '==' para não vazar o token por tempo de resposta.
+    return secrets.compare_digest(token, DASHBOARD_TOKEN)
 
 
 def list_chamados(params: dict):

@@ -76,10 +76,16 @@ Preencha o arquivo `.env` (modelo em [`.env.example`](.env.example)):
 |----------|-----------|
 | `TELEGRAM_BOT_TOKEN` | Token do bot, obtido no @BotFather |
 | `SUPABASE_URL` | URL do projeto Supabase |
-| `SUPABASE_KEY` | Chave de API do Supabase |
+| `SUPABASE_KEY` | ⚠️ Chave **secreta** (`service_role` / `sb_secret_…`) — ignora o RLS. Só no servidor, **nunca** em arquivo de frontend |
 | `GROQ_API_KEY` | Chave de API da Groq |
+| `WEBHOOK_SECRET` | Segredo do webhook do Telegram (header `X-Telegram-Bot-Api-Secret-Token`) |
+| `DASHBOARD_TOKEN` | Protege a escrita em `/api/chamados`. **Obrigatório**: sem ele a escrita é negada |
 
 > 🔒 O `.env` está no `.gitignore` e **nunca** deve ser versionado.
+
+> ⚠️ A `SUPABASE_KEY` é secreta, apesar do nome genérico. A chave que pode ficar
+> exposta no navegador é a *publicável* (`sb_publishable_…`), que é outra coisa.
+> Confundir as duas dá acesso total ao banco a qualquer visitante.
 
 ## ▶️ Como rodar
 
