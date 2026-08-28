@@ -31,25 +31,40 @@ def _client():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def auth_ok(headers) -> bool:
+def auth_error(headers):
     """
-    True se a requisição pode escrever.
+    `None` se a requisição pode escrever; senão `(status, corpo)` explicando por quê.
 
     Falha FECHADA de propósito: sem `DASHBOARD_TOKEN` no ambiente, nega. O
-    comportamento anterior era o inverso (liberava quando a variável estava
-    vazia), o que deixava /api/chamados aceitando create/patch/delete de
-    qualquer origem sempre que a variável não estivesse configurada — e ela não
-    estava no .env local. Validação ausente tem que significar "nega", nunca
-    "libera".
+    comportamento antigo era o inverso (liberava quando a variável estava vazia),
+    o que deixava /api/chamados aceitando create/patch/delete de qualquer origem.
+    Validação ausente tem que significar "nega", nunca "libera".
+
+    Os motivos são distintos de propósito. Um "Unauthorized" genérico não deixa
+    diferenciar "colei o token errado" de "este ambiente não tem a variável
+    configurada" — e essa diferença é exatamente o que trava quem está
+    configurando o dashboard. Nada disso é explorável: o 503 só revela que a
+    escrita está desabilitada, o que não ajuda um atacante.
     """
     if not DASHBOARD_TOKEN:
         logging.error("DASHBOARD_TOKEN nao configurado: escrita em chamados negada.")
-        return False
+        return 503, {"error": "DASHBOARD_TOKEN nao esta configurado neste ambiente. "
+                              "A escrita esta desabilitada aqui."}
 
     header = headers.get("Authorization", "")
-    token = header[7:] if header.startswith("Bearer ") else header
+    token = (header[7:] if header.startswith("Bearer ") else header).strip()
+
+    if not token:
+        return 401, {"error": "Falta o header 'Authorization: Bearer <token>'."}
+    # compare_digest com str exige ASCII puro; sem esta guarda, um token colado
+    # com caractere acentuado levantaria TypeError e viraria erro 500.
+    if not token.isascii():
+        return 401, {"error": "Token contem caracteres invalidos (esperado hexadecimal)."}
     # compare_digest em vez de '==' para não vazar o token por tempo de resposta.
-    return secrets.compare_digest(token, DASHBOARD_TOKEN)
+    if not secrets.compare_digest(token, DASHBOARD_TOKEN):
+        return 401, {"error": "Token invalido para este ambiente."}
+
+    return None
 
 
 def list_chamados(params: dict):
@@ -153,8 +168,9 @@ def stats():
 
 def create(headers, body: dict):
     """Cria um chamado (escrita protegida por token)."""
-    if not auth_ok(headers):
-        return 401, {"error": "Unauthorized"}
+    erro = auth_error(headers)
+    if erro:
+        return erro
 
     required = ["type", "title", "timestamp"]
     missing = [f for f in required if f not in body]
@@ -184,8 +200,9 @@ def create(headers, body: dict):
 
 def patch(headers, body: dict):
     """Atualiza status/nota de um chamado."""
-    if not auth_ok(headers):
-        return 401, {"error": "Unauthorized"}
+    erro = auth_error(headers)
+    if erro:
+        return erro
 
     chamado_id = body.get("id")
     if not chamado_id:
@@ -213,8 +230,9 @@ def patch(headers, body: dict):
 
 def delete(headers, body: dict):
     """Remove um chamado."""
-    if not auth_ok(headers):
-        return 401, {"error": "Unauthorized"}
+    erro = auth_error(headers)
+    if erro:
+        return erro
 
     chamado_id = body.get("id")
     if not chamado_id:
