@@ -70,18 +70,52 @@
     .empty-state p { font-size: 16px; }
     .setup-banner { background: rgba(255,167,38,0.1); border: 1px solid rgba(255,167,38,0.3); border-radius: 8px; padding: 16px; margin-bottom: 20px; font-size: 13px; color: #ffa726; display: none; }
     .header-right { display: flex; align-items: center; gap: 12px; }
-    .token-btn { padding: 6px 12px; border: 1px solid #0f3460; border-radius: 8px; background: #16213e; color: #9e9e9e; font-size: 12px; cursor: pointer; transition: all 0.2s; }
-    .token-btn:hover { color: #fff; border-color: #4fc3f7; }
-    .token-btn.unlocked { color: #66bb6a; border-color: rgba(102,187,106,0.4); }
-    body.readonly .btn-resolver, body.readonly .btn-ignorar, body.readonly .btn-deletar { opacity: 0.45; }
+    .user-chip { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border: 1px solid #0f3460; border-radius: 8px; background: #16213e; font-size: 12px; color: #9e9e9e; }
+    .user-chip .email { color: #66bb6a; }
+    .user-chip .role { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: #888; }
+    .link-btn { background: none; border: none; color: #4fc3f7; font-size: 12px; cursor: pointer; padding: 2px 4px; }
+    .link-btn:hover { text-decoration: underline; }
+    body.readonly .btn-resolver, body.readonly .btn-ignorar, body.readonly .btn-deletar { display: none; }
+
+    /* ---- tela de login ---- */
+    .login-overlay { position: fixed; inset: 0; background: #1a1a2e; z-index: 3000; display: flex; align-items: center; justify-content: center; padding: 24px; }
+    .login-overlay[hidden] { display: none; }
+    .login-card { width: 100%; max-width: 380px; background: #16213e; border: 1px solid #0f3460; border-radius: 14px; padding: 32px; }
+    .login-card h2 { font-size: 20px; margin-bottom: 6px; background: linear-gradient(135deg, #4fc3f7, #7c4dff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .login-card .sub { font-size: 12.5px; color: #888; margin-bottom: 22px; line-height: 1.5; }
+    .login-card label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #888; margin-bottom: 6px; }
+    .login-card input { width: 100%; padding: 11px 13px; margin-bottom: 16px; background: #1a1a2e; border: 1px solid #0f3460; border-radius: 8px; color: #e0e0e0; font-size: 14px; }
+    .login-card input:focus { outline: none; border-color: #4fc3f7; }
+    .login-card button[type="submit"] { width: 100%; padding: 12px; border: none; border-radius: 8px; background: #0f3460; color: #4fc3f7; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+    .login-card button[type="submit"]:hover:not(:disabled) { background: #14487f; color: #fff; }
+    .login-card button[type="submit"]:disabled { opacity: 0.5; cursor: wait; }
+    .login-erro { background: rgba(239,83,80,0.1); border: 1px solid rgba(239,83,80,0.3); border-radius: 8px; padding: 11px 14px; font-size: 12.5px; color: #ef5350; margin-bottom: 16px; line-height: 1.5; }
+    .login-erro[hidden] { display: none; }
     @media (max-width: 768px) { body { padding: 12px; } .stats-row { grid-template-columns: repeat(2, 1fr); } .detail-panel { width: 100%; max-width: 100%; } }
   </style>
 </head>
 <body>
+  <div class="login-overlay" id="loginOverlay">
+    <form class="login-card" id="loginForm">
+      <h2>🧪 LekoAI Test Dashboard</h2>
+      <p class="sub">Acesso restrito. Entre com o e-mail cadastrado por um admin.</p>
+      <div class="login-erro" id="loginErro" hidden></div>
+      <label for="loginEmail">E-mail</label>
+      <input type="email" id="loginEmail" autocomplete="username" required>
+      <label for="loginSenha">Senha</label>
+      <input type="password" id="loginSenha" autocomplete="current-password" required>
+      <button type="submit" id="loginBtn">Entrar</button>
+    </form>
+  </div>
+
   <div class="header">
     <h1>🧪 LekoAI Test Dashboard</h1>
     <div class="header-right">
-      <button class="token-btn" id="tokenBtn" title="Token de escrita (fica so neste navegador)">🔒 Somente leitura</button>
+      <span class="user-chip" id="userChip">
+        <span class="email" id="userEmail">-</span>
+        <span class="role" id="userRole"></span>
+        <button class="link-btn" id="logoutBtn" type="button">sair</button>
+      </span>
       <span class="last-update" id="lastUpdate">Carregando...</span>
     </div>
   </div>
@@ -123,36 +157,102 @@
 
   <script>
     // ====== CONFIGURACAO ======
-    // NAO existe chave do Supabase aqui, de proposito. O dashboard fala apenas
-    // com /api/chamados, que roda no servidor e usa a chave secreta. A leitura
-    // e aberta; a escrita exige o DASHBOARD_TOKEN, que fica guardado somente no
-    // localStorage deste navegador e nunca no codigo-fonte da pagina.
     const API = '/api/chamados';
-    const TOKEN_KEY = 'lekoai_dashboard_token';
+    const SESSAO_KEY = 'lekoai_dashboard_sessao';
+
+    // A chave PUBLICAVEL do Supabase precisa estar aqui: os endpoints de login
+    // exigem o header 'apikey'. Isso NAO reintroduz o problema da Etapa 0.
+    //
+    // O buraco anterior nunca foi a chave -- ela e publica por design, feita
+    // para ficar no navegador. O buraco era a policy da tabela chamados, que
+    // liberava ALL para {public}. Essa policy caiu e os GRANTs do anon foram
+    // revogados, entao hoje esta chave nao le nem escreve nenhuma tabela: serve
+    // exclusivamente para autenticar. Toda leitura e escrita de dados continua
+    // passando por /api/chamados, no servidor, com a chave secreta.
+    const SUPABASE_URL = 'https://ltofxzhlmmounizcsjvl.supabase.co';
+    const SUPABASE_ANON_KEY = 'sb_publishable_O6JBjYJ_jBWDHCE2k3Whlg_x7H6cTYW';
     // ==========================
 
     let filters = { type: '', status: '' };
     let chamadosCache = [];
+    let refreshTimer = null;
 
-    // ---------- token de escrita ----------
-    function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
-    function setToken(v) {
-      if (v) localStorage.setItem(TOKEN_KEY, v); else localStorage.removeItem(TOKEN_KEY);
-      renderTokenState();
+    // ---------- sessao ----------
+    // Guarda o access_token (curta duracao) e o refresh_token no localStorage
+    // deste navegador. Nada de senha e guardado.
+    function getSessao() {
+      try { return JSON.parse(localStorage.getItem(SESSAO_KEY)) || null; }
+      catch (e) { return null; }
     }
-    function renderTokenState() {
-      const has = !!getToken();
-      const btn = document.getElementById('tokenBtn');
-      btn.textContent = has ? '🔓 Escrita liberada' : '🔒 Somente leitura';
-      btn.classList.toggle('unlocked', has);
-      document.body.classList.toggle('readonly', !has);
+    function setSessao(s) {
+      if (s) localStorage.setItem(SESSAO_KEY, JSON.stringify(s));
+      else localStorage.removeItem(SESSAO_KEY);
     }
-    function promptToken() {
-      const atual = getToken();
-      const v = prompt(atual ? 'Token de escrita (deixe vazio para remover):' : 'Cole o DASHBOARD_TOKEN para liberar escrita:', atual);
-      if (v === null) return;
-      setToken(v.trim());
-      showToast(getToken() ? 'Escrita liberada neste navegador.' : 'Token removido.');
+    function getAccessToken() { const s = getSessao(); return s ? s.access_token : ''; }
+
+    async function authFetch(grant, corpo) {
+      const r = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=${grant}`, {
+        method: 'POST',
+        headers: { 'apikey': SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify(corpo),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const msg = body.error_description || body.msg || body.error || `HTTP ${r.status}`;
+        throw new Error(msg);
+      }
+      return body;
+    }
+
+    async function entrar(email, senha) {
+      const s = await authFetch('password', { email: email, password: senha });
+      setSessao({
+        access_token: s.access_token,
+        refresh_token: s.refresh_token,
+        email: (s.user && s.user.email) || email,
+      });
+    }
+
+    // Renova o access_token quando ele expira (o Supabase usa ~1h por padrao).
+    // Devolve true se conseguiu; false obriga login novo.
+    async function renovarSessao() {
+      const s = getSessao();
+      if (!s || !s.refresh_token) return false;
+      try {
+        const novo = await authFetch('refresh_token', { refresh_token: s.refresh_token });
+        setSessao({
+          access_token: novo.access_token,
+          refresh_token: novo.refresh_token,
+          email: (novo.user && novo.user.email) || s.email,
+        });
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function sair(motivo) {
+      setSessao(null);
+      chamadosCache = [];
+      if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+      document.getElementById('tableBody').innerHTML = '';
+      mostrarLogin(motivo || '');
+    }
+
+    function mostrarLogin(erro) {
+      const box = document.getElementById('loginErro');
+      if (erro) { box.textContent = erro; box.hidden = false; } else { box.hidden = true; }
+      document.getElementById('loginOverlay').hidden = false;
+      document.getElementById('loginSenha').value = '';
+      document.getElementById('loginEmail').focus();
+    }
+
+    function iniciarApp() {
+      const s = getSessao();
+      document.getElementById('loginOverlay').hidden = true;
+      document.getElementById('userEmail').textContent = s ? s.email : '-';
+      refresh();
+      if (!refreshTimer) refreshTimer = setInterval(refresh, 60000);
     }
 
     // ---------- helpers ----------
@@ -173,41 +273,45 @@
     }
 
     // ---------- acesso a API ----------
-    async function apiGet(qs) {
-      const r = await fetch(`${API}?${qs}`, { headers: { 'Accept': 'application/json' } });
-      const body = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
-      return body;
-    }
+    // Toda chamada leva o access_token. Num 401 tenta renovar a sessao UMA vez
+    // e repete; se a renovacao falhar, cai para a tela de login. Assim a sessao
+    // expirando no meio do uso nao vira "erro misterioso".
+    async function apiCall(metodo, caminho, payload, jaRenovou) {
+      const headers = { 'Accept': 'application/json' };
+      const tok = getAccessToken();
+      if (tok) headers['Authorization'] = `Bearer ${tok}`;
+      if (payload) headers['Content-Type'] = 'application/json';
 
-    async function apiWrite(payload) {
-      if (!getToken()) {
-        promptToken();
-        if (!getToken()) throw new Error('Escrita bloqueada: nenhum token informado.');
-      }
-      const r = await fetch(API, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${getToken()}` },
-        body: JSON.stringify(payload),
+      const r = await fetch(caminho, {
+        method: metodo,
+        headers: headers,
+        body: payload ? JSON.stringify(payload) : undefined,
       });
       const body = await r.json().catch(() => ({}));
 
-      // NAO apagar o token aqui. A versao anterior fazia setToken('') no 401, o
-      // que devolvia o botao para "somente leitura" e impedia de distinguir
-      // "colei errado" de "o servidor deste ambiente nao tem a variavel".
-      // O token fica, e a mensagem do servidor diz qual e o caso.
-      if (r.status === 503) {
-        showBanner((body.error || 'Escrita desabilitada neste ambiente.') +
-                   ' Se esta e uma URL de preview, marque DASHBOARD_TOKEN tambem para Preview na Vercel.');
-        throw new Error('Servidor sem DASHBOARD_TOKEN (veja o aviso no topo).');
-      }
       if (r.status === 401) {
-        throw new Error((body.error || 'Token rejeitado.') + ' Clique no botao do cabecalho para corrigir.');
+        if (!jaRenovou && await renovarSessao()) {
+          return apiCall(metodo, caminho, payload, true);
+        }
+        sair('Sua sessao expirou. Entre novamente.');
+        throw new Error(body.error || 'Sessao expirada.');
+      }
+      // 403 = autenticado, mas sem permissao. Nao e caso de deslogar: a pessoa
+      // continua logada, so nao pode fazer aquela acao.
+      if (r.status === 403) {
+        showBanner(body.error || 'Sem permissao para esta acao.');
+        throw new Error(body.error || 'Sem permissao.');
+      }
+      if (r.status === 503) {
+        showBanner(body.error || 'Servidor mal configurado neste ambiente.');
+        throw new Error(body.error || 'Servidor mal configurado.');
       }
       if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
-      showBanner('');
       return body;
     }
+
+    function apiGet(qs) { return apiCall('GET', `${API}?${qs}`, null, false); }
+    function apiWrite(payload) { return apiCall('POST', API, payload, false); }
 
     async function loadStats() {
       try {
@@ -307,12 +411,55 @@
     document.querySelectorAll('.filter-btn').forEach(btn => {
       btn.addEventListener('click', () => { filters[btn.dataset.filter] = btn.dataset.value; btn.closest('.group').querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active')); btn.classList.add('active'); loadChamados(); });
     });
-    document.getElementById('tokenBtn').addEventListener('click', promptToken);
 
-    // Init
-    renderTokenState();
-    refresh();
-    setInterval(refresh, 60000);
+    // ---------- login / logout ----------
+    document.getElementById('loginForm').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const btn = document.getElementById('loginBtn');
+      const email = document.getElementById('loginEmail').value.trim();
+      const senha = document.getElementById('loginSenha').value;
+
+      btn.disabled = true;
+      btn.textContent = 'Entrando...';
+      try {
+        await entrar(email, senha);
+        const perfil = await apiGet('action=me');   // confirma que esta autorizado
+        aplicarPerfil(perfil);
+        iniciarApp();
+      } catch (e) {
+        // Erro do Supabase = credencial errada. Erro da nossa API = logou, mas
+        // nao esta cadastrado em dashboard_usuarios. Sao coisas diferentes e a
+        // pessoa precisa saber qual das duas aconteceu.
+        setSessao(null);
+        mostrarLogin(e.message || 'Nao foi possivel entrar.');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Entrar';
+      }
+    });
+
+    document.getElementById('logoutBtn').addEventListener('click', () => sair(''));
+
+    function aplicarPerfil(perfil) {
+      const ehAdmin = perfil && perfil.role === 'admin';
+      document.getElementById('userEmail').textContent = (perfil && perfil.email) || '-';
+      document.getElementById('userRole').textContent = (perfil && perfil.role) || '';
+      // .readonly esconde resolver/ignorar/deletar para quem e 'leitor'
+      document.body.classList.toggle('readonly', !ehAdmin);
+    }
+
+    // ---------- Init ----------
+    // Se ja existe sessao guardada, tenta usar. Se ela nao valer mais, o
+    // apiCall renova ou manda para o login sozinho.
+    (async function iniciar() {
+      if (!getSessao()) { mostrarLogin(''); return; }
+      try {
+        aplicarPerfil(await apiGet('action=me'));
+        iniciarApp();
+      } catch (e) {
+        mostrarLogin(e.message || 'Entre novamente.');
+      }
+    })();
   </script>
 </body>
 </html>

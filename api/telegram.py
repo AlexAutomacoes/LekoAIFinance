@@ -130,10 +130,12 @@ class handler(BaseHTTPRequestHandler):
         from tools import chamados_service
         parsed = urllib.parse.urlparse(self.path)
         params = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
-        if params.get("action") == "stats":
-            status, body = chamados_service.stats()
+        if params.get("action") == "me":
+            status, body = chamados_service.me(self.headers)
+        elif params.get("action") == "stats":
+            status, body = chamados_service.stats(self.headers)
         else:
-            status, body = chamados_service.list_chamados(params)
+            status, body = chamados_service.list_chamados(self.headers, params)
         self._reply_json(status, body)
 
     def _chamados_post(self):
