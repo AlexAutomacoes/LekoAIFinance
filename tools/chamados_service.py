@@ -12,6 +12,7 @@ import os
 import logging
 import secrets
 
+import httpx
 from supabase import create_client
 
 logging.basicConfig(level=logging.INFO)
@@ -31,29 +32,138 @@ def _client():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def auth_ok(headers) -> bool:
+def _identificar_usuario(token: str):
     """
-    True se a requisição pode escrever.
+    Valida um `access_token` do Supabase Auth e devolve o e-mail, ou `None`.
 
-    Falha FECHADA de propósito: sem `DASHBOARD_TOKEN` no ambiente, nega. O
-    comportamento anterior era o inverso (liberava quando a variável estava
-    vazia), o que deixava /api/chamados aceitando create/patch/delete de
-    qualquer origem sempre que a variável não estivesse configurada — e ela não
-    estava no .env local. Validação ausente tem que significar "nega", nunca
-    "libera".
+    Pergunta ao próprio Supabase em vez de conferir a assinatura do JWT aqui.
+    Custa uma ida à rede (~200-400ms), mas evita lidar com criptografia e com o
+    segredo do JWT, e respeita revogação na hora: se a sessão foi encerrada ou o
+    usuário apagado, o Supabase responde 401 mesmo que o token não tenha
+    expirado. Escritas no dashboard são raras, então o custo não incomoda.
     """
-    if not DASHBOARD_TOKEN:
-        logging.error("DASHBOARD_TOKEN nao configurado: escrita em chamados negada.")
-        return False
+    try:
+        r = httpx.get(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {token}"},
+            timeout=8,
+        )
+    except Exception as e:
+        logging.error(f"falha ao validar sessao no Supabase Auth: {e}")
+        return None
 
+    if r.status_code != 200:
+        return None
+    email = (r.json() or {}).get("email")
+    return email.lower() if email else None
+
+
+def _permissao_usuario(email: str):
+    """
+    Devolve o `role` do e-mail em `dashboard_usuarios`, ou `None` se não estiver
+    cadastrado. Falha FECHADA: qualquer erro de banco devolve `None` (nega).
+
+    Estar no Supabase Auth não basta. O projeto pode ter usuários criados para
+    outros fins (há policies para o papel `authenticated` em `n8n_chat_histories`),
+    e nenhum deles deve ganhar acesso ao dashboard sem alguém decidir isso.
+    """
+    try:
+        r = (_client().table("dashboard_usuarios").select("role")
+             .eq("email", email).limit(1).execute())
+    except Exception as e:
+        logging.error(f"falha ao consultar dashboard_usuarios: {e}")
+        return None
+    return r.data[0]["role"] if r.data else None
+
+
+def _autenticar(headers):
+    """
+    Resolve a credencial do header em uma identidade. Devolve `(identidade, erro)`,
+    exatamente um dos dois preenchido.
+
+    Aceita dois tipos de credencial em `Authorization: Bearer <...>`:
+
+      1. `DASHBOARD_TOKEN` — o caminho do robô (GitHub Actions). Um CI não faz
+         login como pessoa, então o token continua existindo.
+      2. `access_token` do Supabase Auth — o caminho humano. Ser válido no Auth
+         NÃO basta: o e-mail precisa estar em `dashboard_usuarios`.
+
+    Falha FECHADA em todos os ramos. Existe como função única para que
+    `auth_error` e `me` compartilhem o resultado: validar a sessão custa uma ida
+    à rede, e o login chamava as duas em sequência, pagando esse custo em dobro.
+    """
     header = headers.get("Authorization", "")
-    token = header[7:] if header.startswith("Bearer ") else header
-    # compare_digest em vez de '==' para não vazar o token por tempo de resposta.
-    return secrets.compare_digest(token, DASHBOARD_TOKEN)
+    credencial = (header[7:] if header.startswith("Bearer ") else header).strip()
+
+    if not credencial:
+        return None, (401, {"error": "Nao autenticado. Faca login no dashboard."})
+    # compare_digest com str exige ASCII puro; sem esta guarda, uma credencial
+    # com caractere acentuado levantaria TypeError e viraria erro 500.
+    if not credencial.isascii():
+        return None, (401, {"error": "Credencial com caracteres invalidos."})
+
+    # --- 1) caminho do robô -------------------------------------------------
+    if DASHBOARD_TOKEN and secrets.compare_digest(credencial, DASHBOARD_TOKEN):
+        return {"email": "robo (DASHBOARD_TOKEN)", "role": "admin"}, None
+
+    # --- 2) caminho humano --------------------------------------------------
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        logging.error("SUPABASE_URL/SUPABASE_KEY ausentes: nao da para validar sessao.")
+        return None, (503, {"error": "Servidor sem configuracao do Supabase."})
+
+    email = _identificar_usuario(credencial)
+    if not email:
+        return None, (401, {"error": "Sessao invalida ou expirada. Faca login novamente."})
+
+    role = _permissao_usuario(email)
+    if role is None:
+        return None, (403, {"error": f"{email} nao esta cadastrado no dashboard. "
+                                     f"Peca a um admin para liberar seu acesso."})
+
+    return {"email": email, "role": role}, None
 
 
-def list_chamados(params: dict):
-    """Lista chamados com filtros/paginação. params: query já achatada em str."""
+def auth_error(headers, escrita: bool = True):
+    """
+    `None` se a requisição pode prosseguir; senão `(status, corpo)` com o motivo.
+
+    Os motivos são distintos de propósito. Um "Unauthorized" genérico não deixa
+    diferenciar "senha errada" de "não estou cadastrado" de "sou leitor e tentei
+    escrever" — e essa diferença é exatamente o que trava quem está configurando
+    o acesso. Nada disso ajuda um atacante: informa em qual etapa ele parou, sem
+    revelar segredo algum.
+    """
+    identidade, erro = _autenticar(headers)
+    if erro:
+        return erro
+    if escrita and identidade["role"] != "admin":
+        return 403, {"error": f"{identidade['email']} tem acesso somente leitura "
+                              f"(role '{identidade['role']}')."}
+    return None
+
+
+def me(headers):
+    """
+    Quem sou eu. O dashboard usa para exibir o e-mail e decidir se mostra os
+    botões de escrita — sem isso o front teria que adivinhar a permissão.
+    """
+    identidade, erro = _autenticar(headers)
+    if erro:
+        return erro
+    return 200, identidade
+
+
+def list_chamados(headers, params: dict):
+    """
+    Lista chamados com filtros/paginação. params: query já achatada em str.
+
+    Exige login: o dashboard é interno e seus chamados carregam detalhes de
+    produção (nomes de teste, latências, trechos de resposta de erro).
+    `escrita=False` — basta estar cadastrado, não precisa ser admin.
+    """
+    erro = auth_error(headers, escrita=False)
+    if erro:
+        return erro
     try:
         supabase = _client()
         query = supabase.table("chamados").select("*")
@@ -88,9 +198,9 @@ def list_chamados(params: dict):
         return 500, {"error": str(e)}
 
 
-def stats():
+def stats(headers):
     """
-    Estatísticas agregadas para os cards do dashboard.
+    Estatísticas agregadas para os cards do dashboard. Exige login (leitura).
 
     Faz 4 consultas, não 10. A versão anterior tinha dois loops — uma consulta
     de contagem por valor de VALID_TYPES e outra por VALID_STATUS —, o que dava
@@ -105,6 +215,9 @@ def stats():
     números que o dashboard mostra e não podem sair errados se a leitura acima
     algum dia for paginada.
     """
+    erro = auth_error(headers, escrita=False)
+    if erro:
+        return erro
     try:
         supabase = _client()
 
@@ -153,8 +266,9 @@ def stats():
 
 def create(headers, body: dict):
     """Cria um chamado (escrita protegida por token)."""
-    if not auth_ok(headers):
-        return 401, {"error": "Unauthorized"}
+    erro = auth_error(headers)
+    if erro:
+        return erro
 
     required = ["type", "title", "timestamp"]
     missing = [f for f in required if f not in body]
@@ -184,8 +298,9 @@ def create(headers, body: dict):
 
 def patch(headers, body: dict):
     """Atualiza status/nota de um chamado."""
-    if not auth_ok(headers):
-        return 401, {"error": "Unauthorized"}
+    erro = auth_error(headers)
+    if erro:
+        return erro
 
     chamado_id = body.get("id")
     if not chamado_id:
@@ -213,8 +328,9 @@ def patch(headers, body: dict):
 
 def delete(headers, body: dict):
     """Remove um chamado."""
-    if not auth_ok(headers):
-        return 401, {"error": "Unauthorized"}
+    erro = auth_error(headers)
+    if erro:
+        return erro
 
     chamado_id = body.get("id")
     if not chamado_id:

@@ -87,6 +87,37 @@ Preencha o arquivo `.env` (modelo em [`.env.example`](.env.example)):
 > exposta no navegador é a *publicável* (`sb_publishable_…`), que é outra coisa.
 > Confundir as duas dá acesso total ao banco a qualquer visitante.
 
+### Acesso ao dashboard de testes (`/dashboard`)
+
+O dashboard é **restrito**. Leitura e escrita exigem credencial, e existem dois tipos:
+
+| Quem | Credencial | Como se obtém |
+|------|-----------|---------------|
+| Pessoas | Login (e-mail + senha) via Supabase Auth | Convite de um admin — ver abaixo |
+| GitHub Actions | `DASHBOARD_TOKEN` | Variável de ambiente (um CI não faz login) |
+
+Estar no Supabase Auth **não basta**: o e-mail também precisa estar na tabela
+`dashboard_usuarios`, com `role`:
+
+- `admin` — lê e escreve (resolver, ignorar, deletar)
+- `leitor` — somente leitura; os botões de escrita não aparecem
+
+São duas camadas porque o projeto Supabase pode ter usuários criados para outros
+fins, e nenhum deles deve ganhar acesso ao dashboard sem alguém decidir isso.
+
+**Para liberar alguém:**
+
+1. Painel do Supabase → *Authentication* → *Users* → **Add user**, marcando
+   *Auto Confirm User* (sem isso o login fica travado esperando confirmação)
+2. `insert into dashboard_usuarios (email, role) values (lower('pessoa@ex.com'), 'admin');`
+
+**Para revogar:** `delete from dashboard_usuarios where email = lower('pessoa@ex.com');`
+A conta continua existindo no Auth, mas perde o acesso ao dashboard.
+
+> 🔒 O cadastro público **precisa** estar desligado em *Authentication → Sign In /
+> Providers → Email → "Allow new users to sign up"*. Ligado, qualquer pessoa se
+> registra sozinha. Detalhes e SQL em [`sql/etapa0c_usuarios_dashboard.sql`](sql/etapa0c_usuarios_dashboard.sql).
+
 ## ▶️ Como rodar
 
 A partir da raiz do projeto (com o `.venv` ativado):
