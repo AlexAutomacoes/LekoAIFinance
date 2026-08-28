@@ -201,13 +201,12 @@
 
     async function loadStats() {
       try {
+        // Uma requisicao so: o endpoint ja devolve erros_abertos (cruzamento de
+        // type=erro com status=aberto), evitando uma segunda ida ao servidor.
         const s = await apiGet('action=stats');
-        // O endpoint de stats devolve by_type e by_status separados; o card quer
-        // o cruzamento (erro E aberto), entao usa a contagem total da listagem.
-        const errosAbertos = await apiGet('type=erro&status=aberto&limit=1');
 
         document.getElementById('statTotal').textContent = s.total || 0;
-        document.getElementById('statErros').textContent = errosAbertos.total || 0;
+        document.getElementById('statErros').textContent = s.erros_abertos || 0;
         document.getElementById('statLatencia').textContent = s.avg_latency_ms ? `${s.avg_latency_ms}ms` : '-';
         document.getElementById('statUltimo').textContent = s.last_run ? fmtDate(s.last_run) : 'Nunca';
         showBanner('');

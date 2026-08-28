@@ -89,26 +89,46 @@ def list_chamados(params: dict):
 
 
 def stats():
-    """Estatísticas agregadas para os cards do dashboard."""
+    """
+    Estatísticas agregadas para os cards do dashboard.
+
+    Faz 4 consultas, não 10. A versão anterior tinha dois loops — uma consulta
+    de contagem por valor de VALID_TYPES e outra por VALID_STATUS —, o que dava
+    10 idas ao Supabase em sequência e ~3,8s de resposta em produção. Isso não
+    incomodava enquanto ninguém chamava este endpoint (o dashboard falava direto
+    com o Supabase), mas agora ele está no caminho crítico do /dashboard e o
+    `maxDuration` da Vercel é de 10s.
+
+    Os dois loops viraram uma única leitura contada em memória: a tabela de
+    chamados é pequena por natureza (registros operacionais do CI diário).
+    `total` e `erros_abertos` seguem como contagem exata no banco, porque são os
+    números que o dashboard mostra e não podem sair errados se a leitura acima
+    algum dia for paginada.
+    """
     try:
         supabase = _client()
 
-        all_resp = supabase.table("chamados").select("id", count="exact").execute()
-        total = all_resp.count or 0
+        total = supabase.table("chamados").select("id", count="exact").execute().count or 0
 
-        by_type = {}
-        for t in VALID_TYPES:
-            r = supabase.table("chamados").select("id", count="exact").eq("type", t).execute()
-            by_type[t] = r.count or 0
+        # O card "Erros Abertos" precisa do cruzamento type=erro AND status=aberto,
+        # que nem by_type nem by_status conseguem dar isoladamente.
+        erros_abertos = (supabase.table("chamados").select("id", count="exact")
+                         .eq("type", "erro").eq("status", "aberto")
+                         .execute().count or 0)
 
-        by_status = {}
-        for s in VALID_STATUS:
-            r = supabase.table("chamados").select("id", count="exact").eq("status", s).execute()
-            by_status[s] = r.count or 0
+        linhas = supabase.table("chamados").select("type, status, latency_ms").execute().data or []
 
-        lat_resp = (supabase.table("chamados").select("latency_ms")
-                    .not_.is_("latency_ms", "null").execute())
-        latencies = [r["latency_ms"] for r in lat_resp.data if r.get("latency_ms")]
+        by_type = {t: 0 for t in VALID_TYPES}
+        by_status = {s: 0 for s in VALID_STATUS}
+        latencies = []
+        for r in linhas:
+            if r.get("type") in by_type:
+                by_type[r["type"]] += 1
+            if r.get("status") in by_status:
+                by_status[r["status"]] += 1
+            if r.get("latency_ms"):
+                latencies.append(r["latency_ms"])
+
         avg_latency = round(sum(latencies) / len(latencies)) if latencies else 0
 
         last_resp = (supabase.table("chamados").select("timestamp")
@@ -120,6 +140,7 @@ def stats():
 
         return 200, {
             "total": total,
+            "erros_abertos": erros_abertos,
             "by_type": by_type,
             "by_status": by_status,
             "avg_latency_ms": avg_latency,
