@@ -57,6 +57,20 @@ def send_document(chat_id: int, file_path: str, caption: str = "") -> None:
         logging.error(f"Falha ao enviar documento ao Telegram: {e}", exc_info=True)
 
 
+def send_photo(chat_id: int, base64_str: str, caption: str = "") -> None:
+    """Envia uma imagem (o QR do PIX) a partir de um base64 (com ou sem prefixo 'data:')."""
+    try:
+        import base64 as _b64
+        dados = base64_str.split(",", 1)[1] if base64_str.startswith("data:") else base64_str
+        img = _b64.b64decode(dados)
+        files = {"photo": ("qrcode.png", img, "image/png")}
+        data = {"chat_id": str(chat_id)}
+        if caption:
+            data["caption"] = caption
+        httpx.post(f"{API_BASE}/sendPhoto", data=data, files=files, timeout=30)
+    except Exception as e:
+        logging.error(f"Falha ao enviar foto ao Telegram: {e}", exc_info=True)
+
 def send_message_with_buttons(chat_id: int, text: str, data_inicio: str, data_fim: str) -> None:
     """Envia uma mensagem com botões Inline via Telegram Bot API."""
     keyboard = {
@@ -83,6 +97,22 @@ def send_message_with_buttons(chat_id: int, text: str, data_inicio: str, data_fi
         logging.error(f"Falha ao enviar botões ao Telegram: {e}")
 
 
+def send_plan_buttons(chat_id: int, text: str) -> None:
+    """Envia os botões dos planos pagos (PIX)."""
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "Plus anual — R$ 119", "callback_data": "buy|plus_annual"}],
+            [{"text": "Vitalício — R$ 200", "callback_data": "buy|lifetime"}],
+        ]
+    }
+    payload = json.dumps({"chat_id": chat_id, "text": text, "reply_markup": keyboard}).encode("utf-8")
+    req = urllib.request.Request(f"{API_BASE}/sendMessage", data=payload,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=15)
+    except Exception as e:
+        logging.error(f"Falha ao enviar botões de planos: {e}")
+
 def answer_callback_query(callback_query_id: str) -> None:
     """Responde o callback query para tirar o estado de carregamento do botão no Telegram."""
     payload = json.dumps({"callback_query_id": callback_query_id}).encode("utf-8")
@@ -108,6 +138,9 @@ class handler(BaseHTTPRequestHandler):
     # ----- Dispatcher: rotas /api/chamados* vao para o servico de chamados -----
     def _is_chamados(self) -> bool:
         return urllib.parse.urlparse(self.path).path.startswith("/api/chamados")
+
+    def _is_pagamento(self) -> bool:
+        return urllib.parse.urlparse(self.path).path.startswith("/api/pagamento")
 
     def _reply_json(self, status: int, body) -> None:
         self.send_response(status)
@@ -155,6 +188,21 @@ class handler(BaseHTTPRequestHandler):
             status, resp = chamados_service.create(self.headers, body)
         self._reply_json(status, resp)
 
+    def _pagamento_post(self):
+        from tools import payment_service
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b""
+        parsed = urllib.parse.urlparse(self.path)
+        query = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
+        try:
+            status, corpo, notificar = payment_service.handle_webhook(self.headers, raw, query)
+        except Exception as e:
+            logging.error(f"erro no webhook de pagamento: {e}", exc_info=True)
+            status, corpo, notificar = 200, {"error": "interno"}, None  # 200 evita reenvio em loop
+        self._reply_json(status, corpo)          # responde rápido primeiro
+        if notificar:                            # só então avisa o usuário no Telegram
+            send_message(notificar["telegram_id"], notificar["texto"])
+
     def do_GET(self):
         if self._is_chamados():
             return self._chamados_get()
@@ -164,6 +212,8 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self._is_chamados():
             return self._chamados_post()
+        if self._is_pagamento():
+            return self._pagamento_post()
         try:
             # Segurança: se o WEBHOOK_SECRET estiver configurado, SEMPRE exigir o header correto.
             if WEBHOOK_SECRET:
@@ -193,32 +243,46 @@ class handler(BaseHTTPRequestHandler):
 
                 logging.info(f"Recebido callback_query: data={data}, chat_id={chat_id}")
 
-                if data.startswith("fmt_") and chat_id:
-                    partes = data.split("|")
-                    formato = "pdf" if partes[0] == "fmt_pdf" else "excel"
-                    data_inicio = partes[1]
-                    data_fim = partes[2]
+            #     if data.startswith("fmt_") and chat_id:
+            #         partes = data.split("|")
+            #         formato = "pdf" if partes[0] == "fmt_pdf" else "excel"
+            #         data_inicio = partes[1]
+            #         data_fim = partes[2]
 
-                    from tools.db_manager import get_or_create_user
-                    from tools.message_handler import gerar_relatorio_por_formato
+            #         from tools.db_manager import get_or_create_user
+            #         from tools.message_handler import gerar_relatorio_por_formato
 
-                    internal_id = get_or_create_user(telegram_id=user.get("id", chat_id), name=user.get("first_name", ""))
-                    respostas = gerar_relatorio_por_formato(
-                        user_id=internal_id,
-                        first_name=user.get("first_name", ""),
-                        data_inicio=data_inicio,
-                        data_fim=data_fim,
-                        formato=formato,
-                    )
-                    for resposta in respostas:
-                        if isinstance(resposta, dict) and resposta.get("tipo") == "documento":
-                            send_document(chat_id, resposta["caminho"], resposta.get("legenda", ""))
-                        else:
-                            send_message(chat_id, resposta)
+            #         internal_id = get_or_create_user(telegram_id=user.get("id", chat_id), name=user.get("first_name", ""))
+            #         respostas = gerar_relatorio_por_formato(
+            #             user_id=internal_id,
+            #             first_name=user.get("first_name", ""),
+            #             data_inicio=data_inicio,
+            #             data_fim=data_fim,
+            #             formato=formato,
+            #         )
+            #         for resposta in respostas:
+            #             if isinstance(resposta, dict) and resposta.get("tipo") == "documento":
+            #                 send_document(chat_id, resposta["caminho"], resposta.get("legenda", ""))
+            #             else:
+            #                 send_message(chat_id, resposta)
+
+            #     self._reply(200, "ok")
+            #     return
+
+
+            # message = update.get("message") or update.get("edited_message")
+
+            if data.startswith("buy|") and chat_id:
+                plano = data.split("|", 1)[1]
+                from tools.message_handler import gerar_cobranca_resposta
+                for resposta in gerar_cobranca_resposta(plano, user.get("id", chat_id)):
+                    if isinstance(resposta, dict) and resposta.get("tipo") == "foto_pix":
+                        send_photo(chat_id, resposta["base64"], resposta.get("legenda", ""))
+                    else:
+                        send_message(chat_id, resposta)
 
                 self._reply(200, "ok")
                 return
-
 
             message = update.get("message") or update.get("edited_message")
             if not message or "text" not in message:
@@ -243,6 +307,10 @@ class handler(BaseHTTPRequestHandler):
                             resposta["data_inicio"],
                             resposta["data_fim"]
                         )
+                    elif tipo == "botoes_planos":
+                        send_plan_buttons(chat_id, resposta["mensagem"])
+                    elif tipo == "foto_pix":
+                        send_photo(chat_id, resposta["base64"], resposta.get("legenda", ""))
                 else:
                     send_message(chat_id, resposta)
 

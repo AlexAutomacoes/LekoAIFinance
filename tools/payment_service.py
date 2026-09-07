@@ -21,6 +21,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 
 from supabase import create_client
+import httpx
 from tools.db_manager import aplicar_plano
 
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +31,14 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 WEBHOOK_SECRET = os.environ.get("ABACATEPAY_WEBHOOK_SECRET", "")
 
 TOLERANCIA_SEGUNDOS = 300  # janela anti-replay (5 min)
+API_BASE = "https://api.abacatepay.com"
+API_KEY = os.environ.get("ABACATEPAY_API_KEY", "")
+
+# Planos pagos via PIX (valor em centavos). O mensal é cartão/assinatura (fica pro 3d).
+PLANOS_PIX = {
+    "plus_annual": {"amount": 11900, "descricao": "LekoAI Plus (anual)"},
+    "lifetime":    {"amount": 20000, "descricao": "LekoAI Vitalicio"},
+}
 
 EVENTOS_ATIVA = {"transparent.completed", "checkout.completed",
                  "subscription.completed", "subscription.renewed"}
@@ -191,3 +200,48 @@ def _revogar(order_id, evento):
             notificar = {"telegram_id": u.data[0]["telegram_id"],
                          "texto": "Seu plano foi cancelado/estornado. Você voltou ao plano Grátis."}
     return 200, {"revogado": True}, notificar
+
+def _post_abacate(path: str, body: dict) -> dict:
+    """POST autenticado na API do AbacatePay. UA próprio (o Cloudflare bloqueia o padrão)."""
+    r = httpx.post(
+        API_BASE + path,
+        json=body,
+        timeout=20,
+        headers={
+            "Authorization": f"Bearer {API_KEY}",
+            "User-Agent": "LekoAIFinance/1.0",
+            "Accept": "application/json",
+        },
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def criar_cobranca_pix(plan_type: str, telegram_id: int) -> dict:
+    """
+    Cria uma cobrança PIX no AbacatePay para o plano (anual/vitalício).
+    Anexa metadata.externalId (= telegram_id) e metadata.plan_type — é assim que o
+    webhook sabe de quem é e qual plano ativar.
+    Devolve {"id", "brCode", "brCodeBase64", "amount", "plan_type"}.
+    """
+    cfg = PLANOS_PIX.get(plan_type)
+    if not cfg:
+        raise ValueError(f"Plano sem cobrança PIX: {plan_type}")
+
+    resp = _post_abacate("/v2/transparents/create", {
+        "method": "PIX",
+        "data": {
+            "amount": cfg["amount"],
+            "expiresIn": 3600,
+            "description": cfg["descricao"],
+            "metadata": {"externalId": str(telegram_id), "plan_type": plan_type},
+        },
+    })
+    d = resp.get("data") or {}
+    return {
+        "id": d.get("id"),
+        "brCode": d.get("brCode"),
+        "brCodeBase64": d.get("brCodeBase64"),
+        "amount": cfg["amount"],
+        "plan_type": plan_type,
+    }

@@ -29,6 +29,7 @@ from tools.subscription import (
     MOTIVO_PERIODO,
     MOTIVO_EXPIRADO
 )
+from tools.payment_service import criar_cobranca_pix
 
 # Acima deste nº de dias, o relatório vira arquivo (PDF/Excel) em vez de texto no chat ("mais de 1 semana").
 LIMITE_DIAS_PDF = 7
@@ -188,6 +189,24 @@ def _build_plano_msg(telegram_id: int, first_name: str) -> str:
             f"Lançamentos neste mês: {usados}/{LIMITE_LANCAMENTOS_FREE}\n"
             f"Relatórios de até 7 dias." + nota_admin)
 
+def gerar_cobranca_resposta(plan_type: str, telegram_id: int) -> list:
+    """Cria a cobrança PIX e devolve as respostas a enviar (QR + copia-e-cola)."""
+    try:
+        cob = criar_cobranca_pix(plan_type, telegram_id)
+    except Exception as e:
+        logging.error("falha ao criar cobranca PIX: %s", e, exc_info=True)
+        return ["Não consegui gerar a cobrança agora. Tente de novo em instantes."]
+
+    nomes = {"plus_annual": "LekoAI Plus (anual) — R$ 119,00",
+             "lifetime": "LekoAI Vitalício — R$ 200,00"}
+    legenda = (f"💳 {nomes.get(plan_type, plan_type)}\n"
+               "Escaneie o QR ou use o código copia-e-cola abaixo. Assim que o pagamento "
+               "cair, seu plano é ativado automaticamente. ✅")
+    return [
+        {"tipo": "foto_pix", "base64": cob["brCodeBase64"], "legenda": legenda},
+        f"📋 PIX copia-e-cola:\n{cob['brCode']}",
+    ]
+
 def _handle_dev(text: str, telegram_id: int, first_name: str) -> list:
     """Comando /dev (só admin) para simular estados de plano nos testes."""
     row = get_or_create_user_row(telegram_id, first_name)
@@ -220,20 +239,18 @@ def _handle_dev(text: str, telegram_id: int, first_name: str) -> list:
     return ["Uso:\n/dev plano <free|plus|plus_vencido|lifetime>\n/dev status"]
 
 def _msg_bloqueio(verdict) -> str:
-    """Mensagem do paywall por motivo. (Entrega 3 vai anexar o botão de pagamento real.)"""
+    """Mensagem do paywall por motivo. Aponta pro /assinar (o botão de pagar vem no 3b-ii parte 2)."""
+    hint = "\n\n👉 Digite /assinar para ver os planos."
     if verdict.motivo == MOTIVO_EXPIRADO:
         return ("⛔ Seu plano venceu.\n"
-                "Renove o LekoAI Plus para voltar a ter lançamentos e relatórios ilimitados.")
+                "Renove o LekoAI Plus para voltar a ter acesso ilimitado." + hint)
     if verdict.motivo == MOTIVO_COTA:
         limite = verdict.meta.get("limite", LIMITE_LANCAMENTOS_FREE)
-        return (f"⛔ Você atingiu o limite de {limite} lançamentos/mês do plano Grátis.\n"
-                "Assine o LekoAI Plus para lançar sem limite. 🚀")
+        return (f"⛔ Você atingiu o limite de {limite} lançamentos/mês do plano Grátis." + hint)
     if verdict.motivo == MOTIVO_PERIODO:
         limite = verdict.meta.get("limite", LIMITE_DIAS_RELATORIO_FREE)
-        return (f"⛔ No plano Grátis os relatórios cobrem até {limite} dias.\n"
-                "Assine o LekoAI Plus para relatórios de qualquer período. 🚀")
-    return "⛔ Este recurso é exclusivo dos planos pagos. Assine o LekoAI Plus. 🚀"
-
+        return (f"⛔ No plano Grátis os relatórios cobrem até {limite} dias." + hint)
+    return "⛔ Este recurso é exclusivo dos planos pagos." + hint
 
 def _gate(user_row, acao, contexto, *, lancamentos_mes=0, periodo_dias=0):
     """
@@ -269,6 +286,11 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
         # Comando /dev — só admin, simula estados de plano
         if text and text.strip().lower().startswith("/dev"):
             return _handle_dev(text, telegram_id, first_name)
+        
+        # Comando /assinar — mostra os planos pagos (botões)
+        if text and text.strip().lower().startswith("/assinar"):
+            return [{"tipo": "botoes_planos",
+                     "mensagem": "🚀 Assine o LekoAI Plus e tenha lançamentos e relatórios ilimitados:"}]
 
         # Camada 2 (IA): interpreta a intenção
         dados = extract_transaction(text)
