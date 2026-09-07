@@ -131,3 +131,13 @@ def contar_lancamentos_mes(user_id: int) -> int:
         .execute()
     )
     return resp.count if resp.count is not None else len(resp.data)
+
+def aplicar_plano(user_id: int, plan_type: str, expires_at) -> None:
+    """
+    Define o plano do usuário. `expires_at`: string ISO ou None (free/lifetime).
+    Usada pelo /dev agora e pelo webhook de pagamento na Entrega 3.
+    """
+    _get_client().table("users").update({
+        "plan_type": plan_type,
+        "subscription_expires_at": expires_at,
+    }).eq("id", user_id).execute()

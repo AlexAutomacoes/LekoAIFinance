@@ -6,15 +6,24 @@ Não depende de python-telegram-bot, por isso é reusada tanto pelo bot local (p
 `tools/telegram_bot.py`) quanto pelo endpoint serverless de webhook (`api/telegram.py`).
 """
 import logging
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
-from tools.db_manager import get_or_create_user, insert_transaction, get_transactions
+from tools.db_manager import (
+    get_or_create_user, 
+    get_or_create_user_row,
+    insert_transaction, 
+    get_transactions,
+    contar_lancamentos_mes,
+    aplicar_plano,
+)
 from tools.llm_router import extract_transaction, generate_financial_tips
 from tools.pdf_report import gerar_pdf_relatorio
+from tools.subscription import check_access, LIMITE_LANCAMENTOS_FREE 
 
 # Acima deste nº de dias, o relatório vira arquivo (PDF/Excel) em vez de texto no chat ("mais de 1 semana").
 LIMITE_DIAS_PDF = 7
-
+FUSO_SP = ZoneInfo("America/Sao_Paulo")
 
 def gerar_relatorio_por_formato(user_id: int, first_name: str, data_inicio: str, data_fim: str, formato: str) -> list:
     """
@@ -119,6 +128,79 @@ def _dias_no_periodo(data_inicio: str, data_fim: str) -> int:
     """Diferença em dias entre as duas datas (formato YYYY-MM-DD)."""
     return (date.fromisoformat(data_fim) - date.fromisoformat(data_inicio)).days
 
+def _fmt_data_br(iso_str) -> str:
+    """'2026-10-01T03:00:00+00:00' -> '01/10/2026' no horário de Brasília."""
+    try:
+        dt = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(FUSO_SP).strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        return str(iso_str)
+
+def _build_plano_msg(telegram_id: int, first_name: str) -> str:
+    """Monta a resposta do comando /plano com o plano atual do usuário."""
+    row = get_or_create_user_row(telegram_id, first_name)
+    plano = row.get("plan_type") or "free"
+    admin = check_access(row, "registrar").meta.get("admin", False)
+    nota_admin = "\n🔓 Você é admin — acesso sempre liberado nos testes." if admin else ""
+
+    if plano == "lifetime":
+        return "🧾 Seu plano: Vitalício ♾️\nAcesso ilimitado, sem vencimento." + nota_admin
+    
+    if plano in ("plus_monthly", "plus_annual"):
+        nome = "LekoAI Plus (mensal)" if plano == "plus_monthly" else "LekoAI Plus (anual)"
+        exp_iso = row.get("subscription_expires_at")
+        exp_dt = None
+        if exp_iso:
+            try:
+                exp_dt = datetime.fromisoformat(str(exp_iso).replace("Z", "+00:00"))
+                if exp_dt.tzinfo is None:
+                    exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                exp_dt = None
+        vencido = (exp_dt is None) or (exp_dt <= datetime.now(timezone.utc))
+        if vencido:
+            quando = f" (venceu em {_fmt_data_br(exp_iso)})" if exp_iso else ""
+            return (f"🧾 Seu plano: {nome} — vencido ⛔{quando}\n"
+                    f"Renove para voltar a ter acesso ilimitado." + nota_admin)
+        return f"🧾 Seu plano: {nome} ✅\nVálido até {_fmt_data_br(exp_iso)}." + nota_admin
+
+    usados = contar_lancamentos_mes(row["id"])
+    return (f"🧾 Seu plano: Grátis 🆓\n"
+            f"Lançamentos neste mês: {usados}/{LIMITE_LANCAMENTOS_FREE}\n"
+            f"Relatórios de até 7 dias." + nota_admin)
+
+def _handle_dev(text: str, telegram_id: int, first_name: str) -> list:
+    """Comando /dev (só admin) para simular estados de plano nos testes."""
+    row = get_or_create_user_row(telegram_id, first_name)
+    if not check_access(row, "registrar").meta.get("admin", False):
+        return ["🚫 O /dev é restrito a admins (coloque seu ID em ADMIN_TELEGRAM_IDS)."]
+
+    partes = text.strip().split()
+    sub = partes[1].lower() if len(partes) > 1 else ""
+
+    if sub == "status":
+        v = check_access(row, "registrar", lancamentos_mes=contar_lancamentos_mes(row["id"]))
+        return [f"🔎 plano={row.get('plan_type')} | exp={row.get('subscription_expires_at')}\n"
+                f"registrar → liberado={v.liberado} motivo={v.motivo} meta={v.meta}"]
+
+    if sub == "plano" and len(partes) > 2:
+        alvo = partes[2].lower()
+        agora = datetime.now(timezone.utc)
+        if alvo == "free":
+            aplicar_plano(row["id"], "free", None)
+        elif alvo == "plus":
+            aplicar_plano(row["id"], "plus_monthly", (agora + timedelta(days=30)).isoformat())
+        elif alvo in ("plus_vencido", "vencido"):
+            aplicar_plano(row["id"], "plus_monthly", (agora - timedelta(days=1)).isoformat())
+        elif alvo == "lifetime":
+            aplicar_plano(row["id"], "lifetime", None)
+        else:
+            return [f"Valor desconhecido: '{alvo}'. Use: free | plus | plus_vencido | lifetime."]
+        return [f"✅ Plano definido para '{alvo}'. Rode /plano para conferir."]
+
+    return ["Uso:\n/dev plano <free|plus|plus_vencido|lifetime>\n/dev status"]            
 
 def process_message(text: str, telegram_id: int, first_name: str) -> list:
     """
@@ -130,6 +212,14 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
         # Comando de boas-vindas / cadastro
         if text and text.strip().lower().startswith("/start"):
             return [_build_welcome(first_name, internal_id)]
+        
+        # Comando /plano — mostra o plano atual e o uso do mês
+        if text and text.strip().lower().startswith("/plano"):
+            return [_build_plano_msg(telegram_id, first_name)]
+
+        # Comando /dev — só admin, simula estados de plano
+        if text and text.strip().lower().startswith("/dev"):
+            return _handle_dev(text, telegram_id, first_name)
 
         # Camada 2 (IA): interpreta a intenção
         dados = extract_transaction(text)

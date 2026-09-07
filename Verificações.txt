@@ -1,0 +1,437 @@
+Verificações da etapa 4.1:
+================================================================================
+AUDITORIA DE SEGURANCA - SUPABASE / LekoAI Finance
+================================================================================
+Projeto Supabase : Agente Financeiro (ref ltofxzhlmmounizcsjvl, sa-east-1)
+Postgres         : 17.6.1.155
+Data             : 2026-08-27
+Branch analisada : fix/relatorio-timeout-llm-dicas
+Escopo           : verificacao (somente leitura). NENHUMA alteracao foi aplicada
+                   no banco nem no codigo.
+
+--------------------------------------------------------------------------------
+RESUMO EXECUTIVO
+--------------------------------------------------------------------------------
+[OK]      RLS esta habilitado nas 4 tabelas existentes.
+[OK]      Papel anonimo nao le nem escreve em users e gastos (verificado na pratica).
+[N/A]     Tabela pagamentos e colunas de plano NAO EXISTEM ainda (estao so no plano).
+[CRITICO] Policy furada em chamados permite que QUALQUER PESSOA na internet
+          altere e apague chamados. Detalhe no achado #1.
+[ATENCAO] SUPABASE_KEY ja e uma chave secreta (service_role), mas o nome generico
+          convida a vaza-la para o front-end. Detalhe no achado #2.
+[ATENCAO] auth_ok() libera escrita na API se DASHBOARD_TOKEN estiver vazio.
+          Detalhe no achado #3.
+
+--------------------------------------------------------------------------------
+1. RLS EM users, gastos E pagamentos
+--------------------------------------------------------------------------------
+Situacao: OK (parcial - pagamentos nao existe)
+
+  TABELA                 RLS       POLICIES
+  ---------------------  --------  --------------------------------------------
+  users                  ligado    NENHUMA  -> nega tudo p/ anon e authenticated
+  gastos                 ligado    NENHUMA  -> nega tudo p/ anon e authenticated
+  n8n_chat_histories     ligado    4, apenas para o papel authenticated
+  chamados               ligado    2 - PROBLEMA, ver achado #1
+  pagamentos             ---       TABELA NAO EXISTE
+
+Verificacao pratica (assumindo o papel anon dentro do banco):
+
+  users                -> 0 linhas visiveis
+  gastos               -> 0 linhas visiveis
+  n8n_chat_histories   -> 0 linhas visiveis
+  chamados             -> 10 linhas visiveis  (todas)
+
+Explicacao: RLS ligado SEM nenhuma policy equivale a uma porta trancada sem
+chave - o padrao do Postgres e negar. Por isso o bot so consegue funcionar
+usando uma chave secreta, que ignora RLS (ver achado #2).
+
+O linter do Supabase reporta rls_enabled_no_policy em users e gastos, nivel
+INFO. Nesse caso NAO e um problema: e exatamente o comportamento desejado.
+
+--------------------------------------------------------------------------------
+2. PAPEL ANONIMO SEM UPDATE/INSERT EM users (SOBRETUDO COLUNAS DE PLANO)
+--------------------------------------------------------------------------------
+Situacao: OK hoje, mas por um unico motivo - vale conhecer o detalhe
+
+O anon nao consegue NADA em users (nem ler), porque nao existe policy alguma.
+
+Porem os GRANTs do Postgres continuam totalmente abertos. Estado atual dos
+privilegios em TODAS as tabelas do schema public:
+
+  anon           -> SELECT, INSERT, UPDATE, DELETE, REFERENCES, TRIGGER, TRUNCATE
+  authenticated  -> SELECT, INSERT, UPDATE, DELETE, REFERENCES, TRIGGER, TRUNCATE
+  service_role   -> SELECT, INSERT, UPDATE, DELETE, REFERENCES, TRIGGER, TRUNCATE
+
+Isso e o padrao de fabrica do Supabase. A consequencia e que o RLS e a UNICA
+trava. Se alguem criar no futuro uma policy permissiva sem pensar, tudo abre de
+uma vez, porque o GRANT por baixo ja permite.
+
+COLUNAS DE PLANO: nao existem. Estrutura atual de users:
+
+  id           integer   identity, PK
+  phone        bigint    unique, NOT NULL
+  name         text      nullable
+  created_at   timestamp nullable, default now()
+  telegram_id  bigint    unique, nullable
+
+Nao ha nenhuma referencia a plano, kiwify ou pagamentos em nenhum arquivo
+.py / .js / .sql / .html do repositorio. Sao itens do implementation_plan.md
+ainda nao implementados.
+
+RECOMENDACAO: o momento certo de blindar a coluna de plano e NA CRIACAO dela.
+Quando criar, considerar revogar explicitamente os GRANTs do anon em users em
+vez de confiar so na ausencia de policy.
+
+--------------------------------------------------------------------------------
+3. PAPEL ANONIMO SEM ACESSO A pagamentos
+--------------------------------------------------------------------------------
+Situacao: N/A - a tabela nao existe. Nada a verificar por enquanto.
+
+Mas a auditoria encontrou um buraco real na tabela vizinha:
+
+  >>> ACHADO #1 - CRITICO - POLICY ABERTA EM chamados <<<
+
+Policy cadastrada no banco:
+
+  tabela     : public.chamados
+  policy     : Allow all for service role
+  roles      : {public}      <-- inclui o anon, inclui qualquer um
+  cmd        : ALL           <-- SELECT, INSERT, UPDATE, DELETE
+  qual       : true
+  with_check : true          <-- sem nenhuma condicao
+
+O nome da policy diz "service role", mas ela foi criada SEM a clausula
+TO service_role. Em Postgres, {public} significa "todo mundo", nao "o papel de
+servico". O nome enganou; o efeito e irrestrito.
+
+Combinado com o cliente:
+
+  public/dashboard.html:122  const SUPABASE_ANON_KEY = sb_publishable_O6JB...
+  public/dashboard.html:221  await db.from(chamados).update({...}).eq(id, id)
+  public/dashboard.html:229  await db.from(chamados).delete().eq(id, id)
+
+IMPACTO: qualquer pessoa que abrir a rota /dashboard e ler o codigo-fonte do
+HTML consegue alterar ou apagar TODOS os chamados. A chave publicavel nao e um
+segredo - ela foi feita para ficar exposta no navegador. Quem deveria proteger
+e a policy, e essa policy nao protege nada.
+
+Ha tambem uma segunda policy, "Allow anonymous read" (SELECT, {public}, true),
+que permite leitura anonima de todos os chamados. Se o conteudo dos chamados
+nao for sensivel, e aceitavel; se for, tambem precisa sair.
+
+--------------------------------------------------------------------------------
+4. WEBHOOK E ATIVACAO USANDO SUPABASE_SERVICE_KEY (service_role)
+--------------------------------------------------------------------------------
+Situacao: o comportamento ja esta correto, mas o NOME da variavel e perigoso
+
+  >>> ACHADO #2 - ATENCAO - NOME GENERICO PARA CHAVE SECRETA <<<
+
+A chave em uso foi inspecionada sem imprimir o valor. Resultado:
+
+  SUPABASE_KEY          -> formato sb_secret_...
+                           (equivalente novo da service_role; IGNORA o RLS)
+  SUPABASE_SERVICE_KEY  -> NAO EXISTE no .env
+
+Ou seja: na pratica o backend ja usa service_role. E por isso que
+tools/db_manager.py consegue inserir em users e gastos, que negam tudo sob RLS.
+
+Onde a variavel e lida:
+
+  tools/db_manager.py:9         key = os.environ.get("SUPABASE_KEY")
+  tools/chamados_service.py:18  SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+  tools/test_supabase.py:9      key = os.environ.get("SUPABASE_KEY")
+
+Onde a variavel e documentada de forma ambigua:
+
+  README.md:79      | SUPABASE_KEY | Chave de API do Supabase |
+  .env.example:10   SUPABASE_KEY=
+  architecture/pop_camada3_dados.md:14
+  architecture/pop_deploy_vercel.md:27
+
+RISCO: "Chave de API do Supabase" e generico o bastante para alguem - ou voce
+mesmo daqui a alguns meses - colar essa chave SECRETA num arquivo de front-end,
+achando que e a chave publica. Isso daria acesso total ao banco a qualquer
+visitante.
+
+Higiene do repositorio (OK): .env esta no .gitignore (linha 4) e nao esta
+rastreado pelo git. Apenas .env.example e versionado, e esta vazio.
+
+WEBHOOK DE PAGAMENTO / ATIVACAO: nao existe ainda. Nao ha codigo de webhook
+Kiwify no repositorio. Este item so podera ser fechado de fato quando o webhook
+for implementado.
+
+--------------------------------------------------------------------------------
+5. O QUE O DASHBOARD REALMENTE PRECISA LER
+--------------------------------------------------------------------------------
+Situacao: o caminho seguro JA EXISTE e esta pronto - falta o front-end usar
+
+Existem dois "dashboards" no projeto; nao confundir:
+
+  a) dashboard/ (app Express, nao rastreado no git)
+     -> usa SQLite local via sql.js (dashboard/db.js). NAO toca no Supabase.
+     -> nenhum risco de exposicao aqui.
+
+  b) public/dashboard.html (o publicado na Vercel, rota /dashboard)
+     -> fala DIRETO com o Supabase usando a chave publicavel. E este o problema.
+
+Ja existe um backend seguro para os chamados:
+
+  api/telegram.py:108        dispatcher que roteia /api/chamados*
+  tools/chamados_service.py  list / stats / create / patch / delete, usando a
+                             chave secreta, no servidor, com checagem de token
+
+Portanto o acesso direto do dashboard.html ao Supabase e redundante - e
+justamente ele que abriu o buraco do achado #1.
+
+MINIMO NECESSARIO para o dashboard funcionar:
+
+  LER de chamados      : id, type, title, description, test_name, latency_ms,
+                         status, resolution_note, timestamp
+  ESCREVER em chamados : status, resolution_note
+  NADA de users, gastos, n8n_chat_histories ou futuros pagamentos.
+
+  >>> ACHADO #3 - ATENCAO - API FALHA ABERTA SEM TOKEN <<<
+
+  tools/chamados_service.py:33-38
+
+    def auth_ok(headers) -> bool:
+        if not DASHBOARD_TOKEN:
+            return True          <-- libera escrita se a variavel estiver vazia
+        ...
+
+Se DASHBOARD_TOKEN nao estiver configurada na Vercel, o endpoint /api/chamados
+aceita create/patch/delete de qualquer origem. Conferir na Vercel. Idealmente
+inverter o padrao: sem token configurado, NEGAR.
+
+--------------------------------------------------------------------------------
+PLANO DE CORRECAO SUGERIDO (nao aplicado)
+--------------------------------------------------------------------------------
+A ORDEM IMPORTA. Derrubar a policy antes do passo 1 quebra o dashboard.
+
+Passo 1) Apontar public/dashboard.html para /api/chamados em vez de criar o
+         cliente Supabase no navegador. Remove a chave do HTML e elimina a
+         escrita anonima. (Trocar as chamadas db.from(chamados)... por fetch
+         para o endpoint que ja existe.)
+
+Passo 2) Confirmar que DASHBOARD_TOKEN esta setada na Vercel. Opcionalmente
+         inverter o default de auth_ok() para negar quando ausente.
+
+Passo 3) Só depois de 1 e 2 testados, remover a policy aberta:
+
+           drop policy "Allow all for service role" on public.chamados;
+
+         Feito o passo 1, o anon nao precisa de policy nenhuma em chamados.
+         Se ainda quiser leitura publica, manter apenas a policy de leitura e
+         restringi-la a TO anon com FOR SELECT.
+
+Passo 4) Renomear SUPABASE_KEY -> SUPABASE_SERVICE_KEY em: tools/db_manager.py,
+         tools/chamados_service.py, tools/test_supabase.py, .env, .env.example,
+         README.md, architecture/*.md e nas variaveis de ambiente da Vercel.
+
+Passo 5) (futuro, ao implementar a monetizacao) Ao criar pagamentos e as colunas
+         de plano em users: ligar RLS, nao criar policy para anon, e revogar
+         explicitamente os GRANTs do anon nessas tabelas. O webhook Kiwify deve
+         usar exclusivamente a chave secreta, no servidor.
+
+LEMBRETE: a branch main faz deploy automatico de producao. Testar ponta a ponta
+antes de mergear.
+
+================================================================================
+FIM DO RELATORIO
+================================================================================
+
+Verificação da etapa 4.2:
+
+1. Assinatura de Segurança (HMAC) e Nomes dos Eventos
+
+Onde verificar: Na documentação oficial de Webhooks da Kiwify (developers.kiwify.com.br) e na aba de Webhooks da plataforma.
+
+Caminho no painel: Acesse Apps > Webhooks (ou Configurações > Webhooks). Ao criar ou testar um Webhook, você pode enviar um evento de teste (order_approved, chargeback, etc.) para uma URL de verificação (como o webhook.site) para analisar o payload e os parâmetros da URL em tempo real.
+
+2. Identificadores de Produto e Oferta
+
+Onde verificar: Diretamente na URL ou na aba de checkout/ofertas do produto.
+
+Caminho no painel:
+
+Vá em Produtos e selecione o produto desejado. O ID do produto aparece na própria URL do navegador.
+
+Clique em Configurações > Links ou Ofertas para visualizar os IDs específicos de cada plano ou oferta criada.
+
+3. Página de Obrigado (Página de Sucesso)
+
+Onde verificar: Nas configurações de checkout do produto.
+
+Caminho no painel: Acesse Produtos > selecione o produto > Configurações > Página de Vendas / Checkout. No campo de URL de redirecionamento/obrigado, insira o link onde o usuário receberá a ativação.
+
+================================================================================
+ANEXO A - VERIFICACAO DA DOCUMENTACAO DA KIWIFY (webhook de pagamento)
+================================================================================
+Data       : 2026-08-27
+Fonte      : https://docs.kiwify.com.br/api-reference/general e demais paginas
+             listadas em https://docs.kiwify.com.br/llms.txt (76 paginas),
+             mais a central de ajuda em ajuda.kiwify.com.br
+Escopo     : verificacao de 4 pontos do plano de monetizacao, antes de codificar
+Resultado  : 1 ponto confirmado, 3 pontos NAO resolviveis pela documentacao
+
+--------------------------------------------------------------------------------
+A.1 FORMATO DA ASSINATURA DE SEGURANCA DO AVISO DE PAGAMENTO
+--------------------------------------------------------------------------------
+Premissa verificada : HMAC sobre o corpo da requisicao, entregue como parametro
+                      de URL chamado signature
+Situacao            : NAO CONFIRMADA
+
+A documentacao publica da Kiwify NAO descreve o formato da assinatura do webhook
+de vendas. Foi puxado o indice completo (llms.txt, 76 paginas) e NAO existe
+nenhuma pagina sobre RECEBER webhooks - apenas sobre criar, listar, consultar,
+editar e apagar webhooks via API.
+
+O unico mecanismo de seguranca documentado e um campo token no corpo do POST de
+criacao do webhook:
+
+  POST /webhooks
+  {
+    "name": "meu webhook",
+    "url": "...",
+    "products": "all",
+    "triggers": [...],
+    "token": "w9i3pvutvxe"
+  }
+
+A documentacao NAO diz o que a Kiwify faz com esse token na entrega: se manda
+como header, se manda como query param, ou se assina o corpo com ele.
+
+  >>> ARMADILHA IMPORTANTE <<<
+
+Existe uma pagina de assinatura criptografica na doc, em
+https://docs.kiwify.com.br/api-reference/banking/webhooks
+mas ela pertence ao KIWIFY BANKING (produto financeiro, escopo diferente) e usa
+assinatura Ed25519 em HEADERS HTTP - nao HMAC em query param.
+Copiar essa implementacao para o webhook de VENDA nao vai funcionar.
+
+A central de ajuda (artigo "Como funcionam os webhooks?") tambem nao detalha;
+ela remete a uma pagina do Notion que nao esta mais linkada publicamente.
+
+COMO RESOLVER NA PRATICA (unico caminho confiavel):
+  1. Criar um endpoint temporario de captura (ou usar RequestBin).
+  2. Cadastrar o webhook da Kiwify apontando para ele.
+  3. Fazer uma compra de teste de R$ 1.
+  4. Registrar a requisicao CRUA: URL completa com query string, TODOS os
+     headers, e o corpo byte a byte (raw, antes de qualquer parse JSON).
+  5. So entao escrever o verificador de assinatura.
+
+Observacao tecnica: se a assinatura for mesmo HMAC sobre o corpo, a verificacao
+precisa usar o corpo BRUTO recebido, nao o JSON re-serializado. Reserializar
+muda espacos e ordem de chaves e quebra a assinatura.
+
+--------------------------------------------------------------------------------
+A.2 NOMES EXATOS DOS EVENTOS
+--------------------------------------------------------------------------------
+Situacao: CONFIRMADO
+Fonte   : https://docs.kiwify.com.br/api-reference/webhooks/create
+
+Sao 10 triggers aceitos. Mapeamento do que foi pedido:
+
+  compra aprovada  ->  compra_aprovada
+  renovacao        ->  subscription_renewed
+  estorno          ->  compra_reembolsada
+  chargeback       ->  chargeback
+  cancelamento     ->  subscription_canceled
+
+Os outros cinco triggers disponiveis:
+
+  boleto_gerado
+  pix_gerado
+  carrinho_abandonado
+  compra_recusada
+  subscription_late
+
+  >>> ATENCAO 1 - EVENTO FALTANDO NO PLANO <<<
+
+subscription_late (pagamento de assinatura atrasado) nao estava na lista
+original, mas e essencial numa monetizacao por assinatura. Sem trata-lo, um
+cliente que simplesmente parou de pagar continua com o plano ativo ate cancelar
+formalmente. Recomendado incluir no webhook desde o inicio.
+
+  >>> ATENCAO 2 - NAO CONFUNDIR ENDPOINTS <<<
+
+O endpoint https://docs.kiwify.com.br/api-reference/events/list, apesar do nome
+"events", e de EVENTOS PRESENCIAIS (ingressos, participantes, check-in). Retorna
+campos como batch_id, checkin_at, cpf. Nao tem NENHUMA relacao com webhooks.
+
+--------------------------------------------------------------------------------
+A.3 IDENTIFICADORES DE PRODUTO E OFERTA DOS TRES PLANOS
+--------------------------------------------------------------------------------
+Situacao: IMPOSSIVEL OBTER PELA DOCUMENTACAO
+
+Esses IDs sao especificos da conta - nenhuma documentacao publica os teria. Alem
+disso, conforme a auditoria principal (secao 2), os tres planos ainda nao existem
+em nenhum lugar do codigo do LekoAI Finance.
+
+Como obter depois de criar os produtos no painel:
+
+  GET /products
+
+Campos retornados por produto:
+  id, name, type, created_at, currency, price, affiliate_enabled, status,
+  payment_type
+
+Formato do id: UUID.
+Exemplo da doc: 1286a0c0-d492-11ed-9709-c3c5046ec174
+
+  >>> PONTO CRITICO - OFERTAS NAO SAO MODELADAS NA API <<<
+
+A resposta de GET /products NAO possui campo de oferta: nao ha offer_id nem
+offers[]. A API publica nao modela ofertas.
+
+Consequencia pratica: se os 3 planos forem 3 OFERTAS de um mesmo produto, nao ha
+como distingui-los por essa rota. Duas saidas:
+
+  Opcao A (recomendada): criar 3 PRODUTOS separados na Kiwify.
+                         Ai o product_id ja identifica o plano, sem ambiguidade.
+  Opcao B: descobrir no payload real do webhook se existe algum campo de oferta.
+           Isso depende do mesmo teste descrito em A.1.
+
+--------------------------------------------------------------------------------
+A.4 ONDE CONFIGURAR A PAGINA DE OBRIGADO COM O LINK DE ATIVACAO
+--------------------------------------------------------------------------------
+Situacao: NAO DOCUMENTADO NA API
+
+Nenhuma das 76 paginas da documentacao trata de pagina de obrigado, thank you
+page ou URL de redirecionamento pos-compra. E configuracao de PAINEL, nao de API.
+
+A central de ajuda (artigo "Como cadastrar o seu produto") cita as abas do
+produto - Area de membros, configuracoes, checkout, coproducao e afiliados - mas
+nao detalha o redirecionamento pos-compra.
+
+O caminho PROVAVEL e a aba Checkout do produto, ou o checkout builder. NAO FOI
+CONFIRMADO. Verificar direto no painel da Kiwify antes de assumir.
+
+Ponto em aberto que precisa ser respondido no painel: quais parametros a Kiwify
+repassa para a URL de obrigado (por exemplo order_id, email). Isso determina se o
+link de ativacao pode ser personalizado por comprador ou se precisa ser um link
+generico que pede o dado ao usuario.
+
+--------------------------------------------------------------------------------
+CONCLUSAO E PROXIMOS PASSOS DO ANEXO A
+--------------------------------------------------------------------------------
+Fechado agora   : A.2 (nomes dos eventos) - suficiente para desenhar o handler.
+Bloqueado       : A.1, A.3 e A.4 dependem de criar os produtos e capturar um
+                  webhook real. A documentacao publica nao resolve.
+
+Ordem sugerida:
+  1. Criar os 3 produtos no painel da Kiwify (ver opcao A em A.3).
+  2. Subir um endpoint de captura e cadastrar o webhook apontando para ele.
+  3. Compra de teste de R$ 1.
+  4. Registrar requisicao crua (URL + headers + corpo bruto).
+  5. So entao implementar verificacao de assinatura e ativacao de plano.
+  6. Ao criar as colunas de plano e a tabela pagamentos, aplicar o passo 5 do
+     plano de correcao da auditoria principal (RLS + revogar GRANTs do anon).
+
+LEMBRETE: usar exclusivamente a chave secreta (service_role) no handler do
+webhook, no servidor. Ver achado #2 da auditoria principal.
+
+================================================================================
+FIM DO ANEXO A
+================================================================================

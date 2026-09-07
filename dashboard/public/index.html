@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LekoAI Test Dashboard</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  min-height: 100vh;
+  padding: 24px;
+}
+.header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 24px; flex-wrap: wrap; gap: 8px;
+}
+.header h1 { font-size: 1.6rem; color: #fff; }
+.header .timestamp { font-size: 0.85rem; color: #8899aa; }
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px; margin-bottom: 24px;
+}
+.stat-card {
+  background: #16213e; border-radius: 12px; padding: 20px;
+  border: 1px solid #0f3460; transition: transform 0.2s;
+}
+.stat-card:hover { transform: translateY(-2px); }
+.stat-card .label { font-size: 0.8rem; color: #8899aa; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.stat-card .value { font-size: 1.8rem; font-weight: 700; color: #fff; }
+.filter-bar {
+  display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; align-items: center;
+}
+.filter-group { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+.filter-group::before { content: attr(data-label); font-size: 0.75rem; color: #8899aa; margin-right: 4px; text-transform: uppercase; }
+.filter-btn {
+  background: #16213e; border: 1px solid #0f3460; color: #ccc;
+  padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.82rem;
+  transition: all 0.2s;
+}
+.filter-btn:hover { border-color: #4a9eff; color: #fff; }
+.filter-btn.active { background: #0f3460; border-color: #4a9eff; color: #fff; }
+.table-wrap {
+  background: #16213e; border-radius: 12px; border: 1px solid #0f3460; overflow-x: auto;
+}
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left; padding: 14px 16px; font-size: 0.75rem;
+  text-transform: uppercase; color: #8899aa; letter-spacing: 0.5px;
+  border-bottom: 1px solid #0f3460;
+}
+td { padding: 12px 16px; border-bottom: 1px solid #0f346033; font-size: 0.88rem; }
+tr { transition: background 0.15s; }
+tr:hover { background: #0f346044; }
+.badge {
+  display: inline-block; padding: 3px 10px; border-radius: 12px;
+  font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
+}
+.badge-erro { background: #ff4d4d22; color: #ff6b6b; border: 1px solid #ff4d4d44; }
+.badge-latencia { background: #ffc04d22; color: #ffd166; border: 1px solid #ffc04d44; }
+.badge-melhoria { background: #4dabff22; color: #4dabff; border: 1px solid #4dabff44; }
+.badge-status { background: #4dff8822; color: #6bffb8; border: 1px solid #4dff8844; }
+.status-aberto { background: #ff8c0022; color: #ffaa44; border: 1px solid #ff8c0044; }
+.status-resolvido { background: #00cc6622; color: #44dd88; border: 1px solid #00cc6644; }
+.status-ignorado { background: #88889922; color: #aaaacc; border: 1px solid #88889944; }
+.actions { display: flex; gap: 6px; }
+.action-btn {
+  padding: 4px 10px; border-radius: 5px; border: none; cursor: pointer;
+  font-size: 0.72rem; font-weight: 600; transition: all 0.2s; color: #fff;
+}
+.action-btn.resolver { background: #28a745; }
+.action-btn.resolver:hover { background: #34d058; }
+.action-btn.ignorar { background: #6c757d; }
+.action-btn.ignorar:hover { background: #868e96; }
+.action-btn.deletar { background: #dc3545; }
+.action-btn.deletar:hover { background: #e85d6b; }
+.empty-state {
+  text-align: center; padding: 60px 20px; color: #667788;
+}
+.empty-state .icon { font-size: 3rem; margin-bottom: 12px; }
+.empty-state p { font-size: 1rem; }
+.toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; }
+.toast {
+  background: #16213e; border: 1px solid #0f3460; color: #e0e0e0;
+  padding: 12px 20px; border-radius: 8px; font-size: 0.85rem;
+  box-shadow: 0 4px 20px #00000066; animation: slideIn 0.3s ease;
+  max-width: 320px;
+}
+.toast.success { border-left: 4px solid #28a745; }
+.toast.error { border-left: 4px solid #dc3545; }
+.toast.info { border-left: 4px solid #4dabff; }
+@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+@keyframes fadeOut { from { opacity: 1; } to { opacity: 0; transform: translateY(10px); } }
+.latency-val { font-weight: 500; }
+.latency-high { color: #ff6b6b; }
+.latency-med { color: #ffd166; }
+.latency-low { color: #6bffb8; }
+@media (max-width: 768px) {
+  body { padding: 12px; }
+  .header h1 { font-size: 1.2rem; }
+  .stat-card .value { font-size: 1.4rem; }
+  td, th { padding: 8px 10px; font-size: 0.8rem; }
+}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>🧪 LekoAI Test Dashboard</h1>
+  <span class="timestamp" id="lastUpdate">Carregando...</span>
+</div>
+
+<div class="stats-row" id="statsRow">
+  <div class="stat-card"><div class="label">Total Chamados</div><div class="value" id="statTotal">—</div></div>
+  <div class="stat-card"><div class="label">Erros Abertos</div><div class="value" id="statErros">—</div></div>
+  <div class="stat-card"><div class="label">Latência Média</div><div class="value" id="statLatencia">—</div></div>
+  <div class="stat-card"><div class="label">Último Teste</div><div class="value" id="statUltimo">—</div></div>
+</div>
+
+<div class="filter-bar">
+  <div class="filter-group" data-label="Tipo:">
+    <button class="filter-btn active" data-filter="tipo" data-value="todos">Todos</button>
+    <button class="filter-btn" data-filter="tipo" data-value="erro">Erro</button>
+    <button class="filter-btn" data-filter="tipo" data-value="latencia">Latência</button>
+    <button class="filter-btn" data-filter="tipo" data-value="melhoria">Melhoria</button>
+    <button class="filter-btn" data-filter="tipo" data-value="status">Status</button>
+  </div>
+  <div class="filter-group" data-label="Status:">
+    <button class="filter-btn active" data-filter="status" data-value="todos">Todos</button>
+    <button class="filter-btn" data-filter="status" data-value="aberto">Aberto</button>
+    <button class="filter-btn" data-filter="status" data-value="resolvido">Resolvido</button>
+    <button class="filter-btn" data-filter="status" data-value="ignorado">Ignorado</button>
+  </div>
+</div>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Tipo</th><th>Título</th><th>Teste</th><th>Latência</th><th>Status</th><th>Data</th><th>Ações</th>
+      </tr>
+    </thead>
+    <tbody id="tableBody"></tbody>
+  </table>
+  <div class="empty-state" id="emptyState" style="display:none;">
+    <div class="icon">📋</div>
+    <p>Nenhum chamado encontrado com os filtros atuais.</p>
+  </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+const API_BASE = 'http://localhost:3847/api';
+let chamados = [];
+let filters = { tipo: 'todos', status: 'todos' };
+
+function showToast(msg, type = 'info') {
+  const container = document.getElementById('toastContainer');
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = msg;
+  container.appendChild(toast);
+  setTimeout(() => { toast.style.animation = 'fadeOut 0.3s ease forwards'; setTimeout(() => toast.remove(), 300); }, 3500);
+}
+
+function formatDate(d) {
+  if (!d) return '—';
+  const dt = new Date(d);
+  return dt.toLocaleDateString('pt-BR') + ' ' + dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+}
+
+function latencyClass(ms) {
+  if (ms == null) return '';
+  if (ms > 2000) return 'latency-high';
+  if (ms > 800) return 'latency-med';
+  return 'latency-low';
+}
+
+function tipoBadge(tipo) {
+  const t = (tipo || '').toLowerCase();
+  return `<span class="badge badge-${t}">${tipo || '—'}</span>`;
+}
+
+function statusBadge(status) {
+  const s = (status || '').toLowerCase();
+  return `<span class="badge status-${s}">${status || '—'}</span>`;
+}
+
+function renderTable() {
+  const tbody = document.getElementById('tableBody');
+  const empty = document.getElementById('emptyState');
+  const filtered = chamados.filter(c => {
+    if (filters.tipo !== 'todos' && (c.tipo || '').toLowerCase() !== filters.tipo) return false;
+    if (filters.status !== 'todos' && (c.status || '').toLowerCase() !== filters.status) return false;
+    return true;
+  });
+  if (filtered.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  tbody.innerHTML = filtered.map(c => `
+    <tr>
+      <td>${tipoBadge(c.tipo)}</td>
+      <td>${c.titulo || c.title || '—'}</td>
+      <td>${c.teste || c.test || '—'}</td>
+      <td><span class="latency-val ${latencyClass(c.latencia)}">${c.latencia != null ? c.latencia + 'ms' : '—'}</span></td>
+      <td>${statusBadge(c.status)}</td>
+      <td>${formatDate(c.createdAt || c.data)}</td>
+      <td class="actions">
+        ${c.status?.toLowerCase() === 'aberto' ? `
+          <button class="action-btn resolver" onclick="actionResolver('${c.id || c._id}')">Resolver</button>
+          <button class="action-btn ignorar" onclick="actionIgnorar('${c.id || c._id}')">Ignorar</button>
+        ` : ''}
+        <button class="action-btn deletar" onclick="actionDeletar('${c.id || c._id}')">Deletar</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+async function fetchData() {
+  try {
+    const [chamadosRes, statsRes] = await Promise.all([
+      fetch(`${API_BASE}/chamados`),
+      fetch(`${API_BASE}/stats`)
+    ]);
+    if (chamadosRes.ok) {
+      chamados = await chamadosRes.json();
+      if (Array.isArray(chamados)) renderTable();
+    }
+    if (statsRes.ok) {
+      const stats = await statsRes.json();
+      document.getElementById('statTotal').textContent = stats.total ?? chamados.length ?? '—';
+      document.getElementById('statErros').textContent = stats.errosAbertos ?? stats.erros ?? '—';
+      document.getElementById('statLatencia').textContent = stats.latenciaMedia != null ? stats.latenciaMedia + 'ms' : '—';
+      document.getElementById('statUltimo').textContent = stats.ultimoTeste ? formatDate(stats.ultimoTeste) : '—';
+    }
+    document.getElementById('lastUpdate').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
+  } catch (e) {
+    showToast('Erro ao carregar dados: ' + e.message, 'error');
+  }
+}
+
+async function patchChamado(id, status, nota) {
+  try {
+    const res = await fetch(`${API_BASE}/chamados/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status, nota })
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    showToast(`Chamado ${status} com sucesso!`, 'success');
+    await fetchData();
+  } catch (e) {
+    showToast('Erro: ' + e.message, 'error');
+  }
+}
+
+async function actionResolver(id) {
+  const nota = prompt('Nota de resolução (opcional):');
+  if (nota === null) return;
+  await patchChamado(id, 'resolvido', nota);
+}
+
+async function actionIgnorar(id) {
+  const nota = prompt('Motivo para ignorar (opcional):');
+  if (nota === null) return;
+  await patchChamado(id, 'ignorado', nota);
+}
+
+async function actionDeletar(id) {
+  if (!confirm('Tem certeza que deseja deletar este chamado?')) return;
+  try {
+    const res = await fetch(`${API_BASE}/chamados/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    showToast('Chamado deletado.', 'success');
+    await fetchData();
+  } catch (e) {
+    showToast('Erro ao deletar: ' + e.message, 'error');
+  }
+}
+
+// Filter buttons
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const group = btn.dataset.filter;
+    const value = btn.dataset.value;
+    filters[group] = value;
+    btn.closest('.filter-group').querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    renderTable();
+  });
+});
+
+// Init + auto-refresh
+fetchData();
+setInterval(fetchData, 60000);
+</script>
+</body>
+</html>
