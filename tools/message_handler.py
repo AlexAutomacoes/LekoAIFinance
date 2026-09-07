@@ -16,10 +16,19 @@ from tools.db_manager import (
     get_transactions,
     contar_lancamentos_mes,
     aplicar_plano,
+    get_user_row_by_id,
 )
 from tools.llm_router import extract_transaction, generate_financial_tips
 from tools.pdf_report import gerar_pdf_relatorio
-from tools.subscription import check_access, LIMITE_LANCAMENTOS_FREE 
+from tools.subscription import (
+    check_access, 
+    LIMITE_LANCAMENTOS_FREE,
+    paywall_ativo,
+    LIMITE_DIAS_RELATORIO_FREE,
+    MOTIVO_COTA,
+    MOTIVO_PERIODO,
+    MOTIVO_EXPIRADO
+)
 
 # Acima deste nº de dias, o relatório vira arquivo (PDF/Excel) em vez de texto no chat ("mais de 1 semana").
 LIMITE_DIAS_PDF = 7
@@ -29,6 +38,14 @@ def gerar_relatorio_por_formato(user_id: int, first_name: str, data_inicio: str,
     """
     Gera o relatório no formato especificado ('pdf' ou 'excel') para o período.
     """
+    # Fecha o "furo dos botões": clicar num botão antigo também passa pelo paywall.
+    row = get_user_row_by_id(user_id)
+    if row is not None:
+        bloqueio = _gate(row, "relatorio", "relatorio-botao",
+                         periodo_dias=_dias_no_periodo(data_inicio, data_fim))
+        if bloqueio:
+            return [bloqueio]
+
     transacoes = get_transactions(user_id=user_id, data_inicio=data_inicio, data_fim=data_fim)
     if not transacoes:
         return [f"Nenhuma transação encontrada no período de {data_inicio} a {data_fim}."]
@@ -58,7 +75,7 @@ def _build_welcome(name: str, internal_id: int) -> str:
     return (
         f"Olá {name}! Bem-vindo ao LekoAIFinance 🚀\n\n"
         f"Seu cadastro foi realizado/confirmado com sucesso (ID Interno: {internal_id}).\n"
-        f"Em breve você poderá me enviar mensagens como 'Gastei 50 no mercado' e eu "
+        f"Em breve você poderá me enviar seus gastos e entradas e eu "
         f"registrarei tudo automaticamente."
     )
 
@@ -200,14 +217,46 @@ def _handle_dev(text: str, telegram_id: int, first_name: str) -> list:
             return [f"Valor desconhecido: '{alvo}'. Use: free | plus | plus_vencido | lifetime."]
         return [f"✅ Plano definido para '{alvo}'. Rode /plano para conferir."]
 
-    return ["Uso:\n/dev plano <free|plus|plus_vencido|lifetime>\n/dev status"]            
+    return ["Uso:\n/dev plano <free|plus|plus_vencido|lifetime>\n/dev status"]
+
+def _msg_bloqueio(verdict) -> str:
+    """Mensagem do paywall por motivo. (Entrega 3 vai anexar o botão de pagamento real.)"""
+    if verdict.motivo == MOTIVO_EXPIRADO:
+        return ("⛔ Seu plano venceu.\n"
+                "Renove o LekoAI Plus para voltar a ter lançamentos e relatórios ilimitados.")
+    if verdict.motivo == MOTIVO_COTA:
+        limite = verdict.meta.get("limite", LIMITE_LANCAMENTOS_FREE)
+        return (f"⛔ Você atingiu o limite de {limite} lançamentos/mês do plano Grátis.\n"
+                "Assine o LekoAI Plus para lançar sem limite. 🚀")
+    if verdict.motivo == MOTIVO_PERIODO:
+        limite = verdict.meta.get("limite", LIMITE_DIAS_RELATORIO_FREE)
+        return (f"⛔ No plano Grátis os relatórios cobrem até {limite} dias.\n"
+                "Assine o LekoAI Plus para relatórios de qualquer período. 🚀")
+    return "⛔ Este recurso é exclusivo dos planos pagos. Assine o LekoAI Plus. 🚀"
+
+
+def _gate(user_row, acao, contexto, *, lancamentos_mes=0, periodo_dias=0):
+    """
+    Aplica o check_access. Devolve None se pode seguir; ou uma STRING de bloqueio
+    se deve parar. Com PAYWALL_ENABLED desligado (sombra), NUNCA bloqueia: apenas
+    registra no log o que teria bloqueado e devolve None.
+    """
+    verdict = check_access(user_row, acao, lancamentos_mes=lancamentos_mes, periodo_dias=periodo_dias)
+    if verdict.liberado:
+        return None
+    if paywall_ativo():
+        return _msg_bloqueio(verdict)
+    logging.warning("[PAYWALL-SOMBRA] %s bloquearia telegram_id=%s motivo=%s meta=%s",
+                    contexto, user_row.get("telegram_id"), verdict.motivo, verdict.meta)
+    return None                
 
 def process_message(text: str, telegram_id: int, first_name: str) -> list:
     """
     Roteia uma mensagem do usuário e retorna a lista de respostas (strings ou objetos de controle) a enviar.
     """
     try:
-        internal_id = get_or_create_user(telegram_id=telegram_id, name=first_name)
+        user_row = get_or_create_user_row(telegram_id=telegram_id, name=first_name)
+        internal_id = user_row["id"]
 
         # Comando de boas-vindas / cadastro
         if text and text.strip().lower().startswith("/start"):
@@ -229,6 +278,12 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
             return [dados.get("mensagem", "Desculpe, não entendi.")]
 
         elif acao == "registrar":
+            # Gate: no plano Grátis, até 20 lançamentos/mês.
+            usados = contar_lancamentos_mes(internal_id)
+            bloqueio = _gate(user_row, "registrar", "registrar", lancamentos_mes=usados)
+            if bloqueio:
+                return [bloqueio]
+
             transacao = dados.get("transacao", {})
             sucesso = insert_transaction(
                 user_id=internal_id,
@@ -251,6 +306,12 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
             if not data_inicio or not data_fim:
                 return ["Nao consegui identificar o periodo. Por favor, me diga a data de "
                         "inicio e fim (ex: 01/06/2026 a 13/06/2026)."]
+
+            # Gate: no plano Grátis, relatórios de até 7 dias.
+            periodo_dias = _dias_no_periodo(data_inicio, data_fim)
+            bloqueio = _gate(user_row, "relatorio", "relatorio-texto", periodo_dias=periodo_dias)
+            if bloqueio:
+                return [bloqueio]
 
             transacoes = get_transactions(
                 user_id=internal_id, data_inicio=data_inicio, data_fim=data_fim

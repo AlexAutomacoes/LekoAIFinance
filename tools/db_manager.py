@@ -141,3 +141,8 @@ def aplicar_plano(user_id: int, plan_type: str, expires_at) -> None:
         "plan_type": plan_type,
         "subscription_expires_at": expires_at,
     }).eq("id", user_id).execute()
+
+def get_user_row_by_id(user_id: int):
+    """Busca a linha completa do usuário pelo id interno (usado no gate dos botões)."""
+    resp = _get_client().table("users").select("*").eq("id", user_id).execute()
+    return resp.data[0] if resp.data else None
