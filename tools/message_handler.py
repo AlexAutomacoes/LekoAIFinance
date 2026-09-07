@@ -197,7 +197,8 @@ def gerar_cobranca_resposta(plan_type: str, telegram_id: int) -> list:
         logging.error("falha ao criar cobranca PIX: %s", e, exc_info=True)
         return ["Não consegui gerar a cobrança agora. Tente de novo em instantes."]
 
-    nomes = {"plus_annual": "LekoAI Plus (anual) — R$ 119,00",
+    nomes = {"plus_monthly": "LekoAI Plus (mensal) — R$ 14,90",
+             "plus_annual": "LekoAI Plus (anual) — R$ 119,00",
              "lifetime": "LekoAI Vitalício — R$ 200,00"}
     legenda = (f"💳 {nomes.get(plan_type, plan_type)}\n"
                "Escaneie o QR ou use o código copia-e-cola abaixo. Assim que o pagamento "

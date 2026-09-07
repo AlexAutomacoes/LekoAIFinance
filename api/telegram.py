@@ -101,6 +101,7 @@ def send_plan_buttons(chat_id: int, text: str) -> None:
     """Envia os botões dos planos pagos (PIX)."""
     keyboard = {
         "inline_keyboard": [
+            [{"text": "Plus mensal — R$ 14,90", "callback_data": "buy|plus_monthly"}],
             [{"text": "Plus anual — R$ 119", "callback_data": "buy|plus_annual"}],
             [{"text": "Vitalício — R$ 200", "callback_data": "buy|lifetime"}],
         ]

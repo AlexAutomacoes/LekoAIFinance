@@ -36,9 +36,12 @@ API_KEY = os.environ.get("ABACATEPAY_API_KEY", "")
 
 # Planos pagos via PIX (valor em centavos). O mensal é cartão/assinatura (fica pro 3d).
 PLANOS_PIX = {
-    "plus_annual": {"amount": 11900, "descricao": "LekoAI Plus (anual)"},
-    "lifetime":    {"amount": 20000, "descricao": "LekoAI Vitalicio"},
+    "plus_monthly": {"amount": 1490,  "descricao": "LekoAI Plus (mensal)"},
+    "plus_annual":  {"amount": 11900, "descricao": "LekoAI Plus (anual)"},
+    "lifetime":     {"amount": 20000, "descricao": "LekoAI Vitalicio"},
 }
+
+PRODUTO_MENSAL = os.environ.get("ABACATEPAY_PRODUTO_MENSAL", "")
 
 EVENTOS_ATIVA = {"transparent.completed", "checkout.completed",
                  "subscription.completed", "subscription.renewed"}
@@ -245,3 +248,20 @@ def criar_cobranca_pix(plan_type: str, telegram_id: int) -> dict:
         "amount": cfg["amount"],
         "plan_type": plan_type,
     }
+
+def criar_assinatura_cartao(telegram_id: int) -> dict:
+    """
+    Cria um checkout de ASSINATURA (cartão, Plus mensal) no AbacatePay.
+    Passa externalId + metadata (= telegram_id) para o webhook ligar ao usuário.
+    Devolve {"id", "url", "plan_type"}.
+    """
+    if not PRODUTO_MENSAL:
+        raise ValueError("ABACATEPAY_PRODUTO_MENSAL não configurado no .env")
+    resp = _post_abacate("/v2/subscriptions/create", {
+        "items": [{"id": PRODUTO_MENSAL, "quantity": 1}],
+        "methods": ["CARD"],
+        "externalId": str(telegram_id),
+        "metadata": {"externalId": str(telegram_id), "plan_type": "plus_monthly"},
+    })
+    d = resp.get("data") or {}
+    return {"id": d.get("id"), "url": d.get("url"), "plan_type": "plus_monthly"}
