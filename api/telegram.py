@@ -244,43 +244,37 @@ class handler(BaseHTTPRequestHandler):
 
                 logging.info(f"Recebido callback_query: data={data}, chat_id={chat_id}")
 
-            #     if data.startswith("fmt_") and chat_id:
-            #         partes = data.split("|")
-            #         formato = "pdf" if partes[0] == "fmt_pdf" else "excel"
-            #         data_inicio = partes[1]
-            #         data_fim = partes[2]
+                if data.startswith("fmt_") and chat_id:
+                    partes = data.split("|")
+                    formato = "pdf" if partes[0] == "fmt_pdf" else "excel"
+                    data_inicio = partes[1]
+                    data_fim = partes[2]
 
-            #         from tools.db_manager import get_or_create_user
-            #         from tools.message_handler import gerar_relatorio_por_formato
+                    from tools.db_manager import get_or_create_user
+                    from tools.message_handler import gerar_relatorio_por_formato
 
-            #         internal_id = get_or_create_user(telegram_id=user.get("id", chat_id), name=user.get("first_name", ""))
-            #         respostas = gerar_relatorio_por_formato(
-            #             user_id=internal_id,
-            #             first_name=user.get("first_name", ""),
-            #             data_inicio=data_inicio,
-            #             data_fim=data_fim,
-            #             formato=formato,
-            #         )
-            #         for resposta in respostas:
-            #             if isinstance(resposta, dict) and resposta.get("tipo") == "documento":
-            #                 send_document(chat_id, resposta["caminho"], resposta.get("legenda", ""))
-            #             else:
-            #                 send_message(chat_id, resposta)
+                    internal_id = get_or_create_user(telegram_id=user.get("id", chat_id), name=user.get("first_name", ""))
+                    respostas = gerar_relatorio_por_formato(
+                        user_id=internal_id,
+                        first_name=user.get("first_name", ""),
+                        data_inicio=data_inicio,
+                        data_fim=data_fim,
+                        formato=formato,
+                    )
+                    for resposta in respostas:
+                        if isinstance(resposta, dict) and resposta.get("tipo") == "documento":
+                            send_document(chat_id, resposta["caminho"], resposta.get("legenda", ""))
+                        else:
+                            send_message(chat_id, resposta)
 
-            #     self._reply(200, "ok")
-            #     return
-
-
-            # message = update.get("message") or update.get("edited_message")
-
-            if data.startswith("buy|") and chat_id:
-                plano = data.split("|", 1)[1]
-                from tools.message_handler import gerar_cobranca_resposta
-                for resposta in gerar_cobranca_resposta(plano, user.get("id", chat_id)):
-                    if isinstance(resposta, dict) and resposta.get("tipo") == "foto_pix":
-                        send_photo(chat_id, resposta["base64"], resposta.get("legenda", ""))
-                    else:
-                        send_message(chat_id, resposta)
+                if data.startswith("buy|") and chat_id:
+                    plano = data.split("|", 1)[1]
+                    from tools.message_handler import gerar_cobranca_resposta
+                    for resposta in gerar_cobranca_resposta(plano, user.get("id", chat_id)):
+                        if isinstance(resposta, dict) and resposta.get("tipo") == "foto_pix":
+                            send_photo(chat_id, resposta["base64"], resposta.get("legenda", ""))
+                        else:
+                            send_message(chat_id, resposta)
 
                 self._reply(200, "ok")
                 return
