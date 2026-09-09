@@ -64,10 +64,6 @@ def _assinatura_valida(headers, raw_body: bytes, query: dict = None) -> bool:
         return False
 
     query = query or {}
-    try:  # diagnóstico temporário: quais headers realmente chegam
-        logging.warning("headers recebidos no webhook: %s", list(dict(headers).keys()))
-    except Exception:
-        pass
 
     msg_id = headers.get("webhook-id", "")
     ts = headers.get("webhook-timestamp", "")
@@ -126,15 +122,14 @@ def handle_webhook(headers, raw_body: bytes, query: dict):
     if not _assinatura_valida(headers, raw_body, query):
         return 401, {"error": "assinatura invalida"}, None
 
-    logging.warning("DIAG corpo bruto (700): %r", raw_body[:700])  # temporário
-
     try:
         evento = json.loads(raw_body)
     except Exception as e:
         logging.error("webhook com JSON inválido: %s", e)
         return 400, {"error": "json invalido"}, None
 
-    tipo = evento.get("type", "")
+    # O AbacatePay manda o tipo ora em "type", ora em "event" (varia por webhook) — aceitar os dois.
+    tipo = evento.get("type") or evento.get("event") or ""
     data = evento.get("data", {}) or {}
     # a cobrança fica aninhada por tipo: data.transparent / data.subscription / data.checkout
     prefixo = tipo.split(".", 1)[0]
