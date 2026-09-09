@@ -126,6 +126,8 @@ def handle_webhook(headers, raw_body: bytes, query: dict):
     if not _assinatura_valida(headers, raw_body, query):
         return 401, {"error": "assinatura invalida"}, None
 
+    logging.warning("DIAG corpo bruto (700): %r", raw_body[:700])  # temporário
+
     try:
         evento = json.loads(raw_body)
     except Exception as e:
