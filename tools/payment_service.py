@@ -53,43 +53,56 @@ def _client():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def _assinatura_valida(headers, raw_body: bytes) -> bool:
-    """Valida a assinatura Standard Webhooks. Falha FECHADA."""
+def _assinatura_valida(headers, raw_body: bytes, query: dict = None) -> bool:
+    """
+    Valida o webhook. Falha FECHADA. Aceita os DOIS mecanismos do AbacatePay:
+      1) Standard Webhooks (headers webhook-id/timestamp/signature + HMAC) — preferível;
+      2) secret na query (?webhookSecret=...) — usado quando os headers não chegam.
+    """
     if not WEBHOOK_SECRET:
         logging.error("ABACATEPAY_WEBHOOK_SECRET ausente — negando webhook (fail-closed).")
         return False
 
+    query = query or {}
+    try:  # diagnóstico temporário: quais headers realmente chegam
+        logging.warning("headers recebidos no webhook: %s", list(dict(headers).keys()))
+    except Exception:
+        pass
+
     msg_id = headers.get("webhook-id", "")
     ts = headers.get("webhook-timestamp", "")
     assinatura = headers.get("webhook-signature", "")
-    if not (msg_id and ts and assinatura):
-        logging.warning("webhook sem headers de assinatura.")
-        return False
 
-    # anti-replay: rejeita timestamp muito antigo/futuro
-    try:
-        if abs(time.time() - int(ts)) > TOLERANCIA_SEGUNDOS:
-            logging.warning("webhook com timestamp fora da janela (possível replay).")
+    if msg_id and ts and assinatura:
+        # --- caminho 1: HMAC Standard Webhooks ---
+        try:
+            if abs(time.time() - int(ts)) > TOLERANCIA_SEGUNDOS:
+                logging.warning("webhook com timestamp fora da janela (possível replay).")
+                return False
+        except (ValueError, TypeError):
             return False
-    except (ValueError, TypeError):
+
+        seg = WEBHOOK_SECRET[len("whsec_"):] if WEBHOOK_SECRET.startswith("whsec_") else WEBHOOK_SECRET
+        try:
+            key = base64.b64decode(seg)
+        except Exception:
+            key = WEBHOOK_SECRET.encode("utf-8")  # fallback: usa o segredo cru
+
+        assinado = f"{msg_id}.{ts}.".encode("utf-8") + raw_body
+        esperado = base64.b64encode(hmac.new(key, assinado, hashlib.sha256).digest()).decode()
+        for token in assinatura.split():
+            sig = token.split(",", 1)[1] if "," in token else token
+            if hmac.compare_digest(sig, esperado):
+                return True
+        logging.warning("assinatura HMAC do webhook não confere.")
         return False
 
-    # secret Standard Webhooks: "whsec_<base64>" -> a chave é o base64 decodificado
-    seg = WEBHOOK_SECRET[len("whsec_"):] if WEBHOOK_SECRET.startswith("whsec_") else WEBHOOK_SECRET
-    try:
-        key = base64.b64decode(seg)
-    except Exception:
-        key = WEBHOOK_SECRET.encode("utf-8")  # fallback: usa o segredo cru
+    # --- caminho 2: secret na query (?webhookSecret=...) ---
+    qsecret = query.get("webhookSecret") or query.get("secret") or ""
+    if qsecret and hmac.compare_digest(qsecret, WEBHOOK_SECRET):
+        return True
 
-    assinado = f"{msg_id}.{ts}.".encode("utf-8") + raw_body
-    esperado = base64.b64encode(hmac.new(key, assinado, hashlib.sha256).digest()).decode()
-
-    # o header pode trazer várias assinaturas separadas por espaço; cada uma "v1,<sig>"
-    for token in assinatura.split():
-        sig = token.split(",", 1)[1] if "," in token else token
-        if hmac.compare_digest(sig, esperado):
-            return True
-    logging.warning("assinatura do webhook não confere.")
+    logging.warning("webhook sem headers de assinatura e sem secret válido na query.")
     return False
 
 
@@ -110,7 +123,7 @@ def _inferir_plano(obj: dict) -> str:
 
 def handle_webhook(headers, raw_body: bytes, query: dict):
     """Ponto de entrada do webhook. Devolve (status_http, corpo_dict, notificar|None)."""
-    if not _assinatura_valida(headers, raw_body):
+    if not _assinatura_valida(headers, raw_body, query):
         return 401, {"error": "assinatura invalida"}, None
 
     try:
