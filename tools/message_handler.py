@@ -17,6 +17,7 @@ from tools.db_manager import (
     contar_lancamentos_mes,
     aplicar_plano,
     get_user_row_by_id,
+    salvar_rascunho_chamado,
 )
 from tools.llm_router import extract_transaction, generate_financial_tips
 from tools.pdf_report import gerar_pdf_relatorio
@@ -34,6 +35,16 @@ from tools.payment_service import criar_cobranca_pix
 # Acima deste nº de dias, o relatório vira arquivo (PDF/Excel) em vez de texto no chat ("mais de 1 semana").
 LIMITE_DIAS_PDF = 7
 FUSO_SP = ZoneInfo("America/Sao_Paulo")
+
+# --- /chamado ----------------------------------------------------------------
+# Rascunho abandonado expira: se a pessoa some no meio e volta amanhã, a mensagem
+# dela volta a ser uma mensagem normal — e não vira o texto de um chamado.
+CHAMADO_EXPIRA_MIN = 30
+PERGUNTA_PROBLEMA = ("🛠️ Vamos abrir um chamado.\n\n"
+                     "1/2 — Qual o problema ocorrido?\n\n"
+                     "(Para desistir, é só mandar /cancelar.)")
+PERGUNTA_ESPERADO = "2/2 — Como o sistema deveria se comportar?"
+TAMANHO_MINIMO_RESPOSTA = 5
 
 def gerar_relatorio_por_formato(user_id: int, first_name: str, data_inicio: str, data_fim: str, formato: str) -> list:
     """
@@ -77,7 +88,8 @@ def _build_welcome(name: str, internal_id: int) -> str:
         f"Olá {name}! 👋 Bem-vindo ao LekoAI Finance — seu assistente de finanças no Telegram. 🚀\n\n"
         f"É só me mandar coisas como \"gastei 50 no mercado\" ou \"recebi 2000 de salário\" que eu "
         f"registro tudo automaticamente. Quando quiser, é só pedir um relatório. 📊\n\n"
-        f"🆓 No plano Grátis: 20 lançamentos por mês + relatórios de até 7 dias."
+        f"🆓 No plano Grátis: 20 lançamentos por mês + relatórios de até 7 dias.\n\n"
+        f"🛠️ Achou algum problema? Manda /chamado que eu registro para a equipe."
     )
 
 
@@ -268,6 +280,49 @@ def _gate(user_row, acao, contexto, *, lancamentos_mes=0, periodo_dias=0):
                     contexto, user_row.get("telegram_id"), verdict.motivo, verdict.meta)
     return None                
 
+def _rascunho_ativo(user_row) -> bool:
+    """A pessoa está no meio de um /chamado e o rascunho ainda vale?"""
+    if not user_row.get("chamado_etapa"):
+        return False
+    try:
+        iniciado = datetime.fromisoformat(
+            str(user_row.get("chamado_iniciado_em")).replace("Z", "+00:00"))
+        if iniciado.tzinfo is None:
+            iniciado = iniciado.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False  # sem data confiável, trata como se não houvesse rascunho
+    return datetime.now(timezone.utc) - iniciado < timedelta(minutes=CHAMADO_EXPIRA_MIN)
+
+
+def _responder_chamado(user_row, texto: str, first_name: str) -> list:
+    """Recebe a resposta do usuário na etapa atual do /chamado."""
+    if len(texto) < TAMANHO_MINIMO_RESPOSTA:
+        return ["Me conta com um pouco mais de detalhe, por favor. 🙏"]
+
+    if user_row["chamado_etapa"] == "problema":
+        salvar_rascunho_chamado(user_row["id"], "esperado", problema=texto)
+        return [PERGUNTA_ESPERADO]
+
+    # Etapa 'esperado': fecha o chamado. Import local para não pesar o cold start
+    # do webhook — quem manda /chamado é minoria das mensagens.
+    from tools.chamados_service import criar_pelo_bot
+    chamado_id = criar_pelo_bot(
+        telegram_id=user_row.get("telegram_id"),
+        nome=first_name,
+        problema=user_row.get("chamado_problema") or "(não informado)",
+        esperado=texto,
+    )
+    # Limpa o rascunho mesmo se a gravação falhou: deixar o usuário preso na
+    # etapa 2 seria pior — ele repete o /chamado e tenta de novo do começo.
+    salvar_rascunho_chamado(user_row["id"], None)
+
+    if chamado_id is None:
+        return ["😕 Não consegui registrar seu chamado agora. "
+                "Tente de novo daqui a alguns minutos."]
+    return [f"✅ Chamado #{chamado_id} registrado!\n\n"
+            f"Obrigado por reportar — a equipe vai analisar. 🙏"]
+
+
 def process_message(text: str, telegram_id: int, first_name: str) -> list:
     """
     Roteia uma mensagem do usuário e retorna a lista de respostas (strings ou objetos de controle) a enviar.
@@ -275,6 +330,30 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
     try:
         user_row, is_new = get_or_create_user_row(telegram_id=telegram_id, name=first_name, retornar_criado=True)
         internal_id = user_row["id"]
+
+        texto = (text or "").strip()
+        comando = texto.lower()
+
+        # --- /chamado: conversa de 2 perguntas --------------------------------
+        # Vem antes de todo o resto porque, enquanto o rascunho está aberto, a
+        # próxima mensagem é a RESPOSTA da pergunta — não pode ir para a IA.
+        if comando.startswith("/chamado"):
+            salvar_rascunho_chamado(internal_id, "problema")
+            return [PERGUNTA_PROBLEMA]
+
+        if comando.startswith("/cancelar"):
+            if _rascunho_ativo(user_row):
+                salvar_rascunho_chamado(internal_id, None)
+                return ["Beleza, chamado cancelado. 👍"]
+            return ["Não tem nada em andamento para cancelar. 🙂"]
+
+        if _rascunho_ativo(user_row):
+            if texto.startswith("/"):
+                # Outro comando no meio do fluxo: o comando ganha, o chamado cai.
+                salvar_rascunho_chamado(internal_id, None)
+                return ["ℹ️ Cancelei o chamado em andamento porque você mandou "
+                        "outro comando. Pode repetir o comando agora. 🙂"]
+            return _responder_chamado(user_row, texto, first_name)
 
         # Comando de boas-vindas / cadastro
         if text and text.strip().lower().startswith("/start"):

@@ -146,3 +146,23 @@ def get_user_row_by_id(user_id: int):
     """Busca a linha completa do usuário pelo id interno (usado no gate dos botões)."""
     resp = _get_client().table("users").select("*").eq("id", user_id).execute()
     return resp.data[0] if resp.data else None
+
+def salvar_rascunho_chamado(user_id: int, etapa, problema: str = None) -> None:
+    """
+    Guarda em que ponto do /chamado o usuário está.
+
+    O bot é serverless: cada mensagem é uma execução nova, sem memória. Uma
+    conversa de duas perguntas só funciona se o "onde eu parei" ficar no banco.
+    Fica em `users` (e não numa tabela à parte) porque a linha do usuário já é
+    lida em toda mensagem — assim o fluxo normal não paga nenhuma consulta a mais.
+
+    Uma função só para os três momentos:
+      - começar:  etapa='problema'
+      - avançar:  etapa='esperado', problema=<o que ele respondeu>
+      - encerrar: etapa=None (limpa tudo)
+    """
+    _get_client().table("users").update({
+        "chamado_etapa": etapa,
+        "chamado_problema": problema,
+        "chamado_iniciado_em": datetime.now(timezone.utc).isoformat() if etapa else None,
+    }).eq("id", user_id).execute()

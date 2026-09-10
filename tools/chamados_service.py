@@ -11,6 +11,7 @@ Tabela Supabase: "chamados".
 import os
 import logging
 import secrets
+from datetime import datetime, timezone
 
 import httpx
 from supabase import create_client
@@ -344,3 +345,43 @@ def delete(headers, body: dict):
     except Exception as e:
         logging.error(f"chamados delete error: {e}", exc_info=True)
         return 500, {"error": str(e)}
+
+
+# Tamanho do título gerado a partir do relato do cliente. O texto inteiro vai na
+# descrição; o título é só o que aparece na listagem do dashboard.
+LIMITE_TITULO = 80
+
+
+def criar_pelo_bot(telegram_id: int, nome: str, problema: str, esperado: str):
+    """
+    Cria um chamado aberto pelo próprio cliente no Telegram (comando /chamado).
+
+    Não passa por `auth_error` de propósito: quem chama é o webhook do bot, já
+    dentro do servidor e com a chave de serviço — não existe requisição HTTP
+    externa para autenticar aqui. As funções acima continuam sendo o caminho do
+    dashboard, e essa distinção é o que mantém a escrita pela rede protegida.
+
+    Reusa as colunas que já existem (a tabela só aceita os 4 `type` do CI):
+    `type='erro'`, o prefixo [Cliente] no título separa do que vem do CI, e
+    `test_name` guarda quem abriu.
+
+    Devolve o id do chamado criado, ou None se falhou.
+    """
+    resumo = " ".join(problema.split())  # tira quebras de linha do título
+    titulo = resumo if len(resumo) <= LIMITE_TITULO else resumo[:LIMITE_TITULO - 1] + "…"
+
+    chamado = {
+        "type": "erro",
+        "title": f"[Cliente] {titulo}",
+        "description": (f"Problema relatado:\n{problema}\n\n"
+                        f"Comportamento esperado:\n{esperado}"),
+        "test_name": f"telegram:{telegram_id}" + (f" ({nome})" if nome else ""),
+        "status": "aberto",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        r = _client().table("chamados").insert(chamado).execute()
+        return r.data[0]["id"] if r.data else None
+    except Exception as e:
+        logging.error(f"falha ao criar chamado pelo bot: {e}", exc_info=True)
+        return None
