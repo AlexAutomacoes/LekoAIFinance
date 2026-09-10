@@ -21,17 +21,17 @@ def _get_client() -> Client:
     """
     return create_client(url, key)
 
-def get_or_create_user_row(telegram_id:int, name:str):
+def get_or_create_user_row(telegram_id:int, name:str, retornar_criado: bool = False):
     """
-    Igual à get_or_create_user, mas devolve a LINHA INTEIRA do usuário
-    (id, telegram_id, plan_type, subscription_expires_at, ...), pra não
-    precisar de uma segunda consulta só pra saber o plano.
+    Devolve a LINHA INTEIRA do usuário (id, telegram_id, plan_type, ...).
+    Com retornar_criado=True, devolve (row, criado) onde `criado` diz se o usuário
+    acabou de ser cadastrado AGORA (útil pro onboarding de usuário novo).
     """
     supabase = _get_client()
     resp = supabase.table("users").select("*").eq("telegram_id", telegram_id).execute()
     if len(resp.data) > 0:
-        return resp.data[0]
-    
+        return (resp.data[0], False) if retornar_criado else resp.data[0]
+
     # phone é NOT NULL; o Telegram não dá o telefone, então usamos o telegram_id
     novo = {
         "telegram_id": telegram_id,
@@ -41,7 +41,7 @@ def get_or_create_user_row(telegram_id:int, name:str):
     }
     ins = supabase.table("users").insert(novo).execute()
     if len(ins.data) > 0:
-        return ins.data[0]
+        return (ins.data[0], True) if retornar_criado else ins.data[0]
     raise Exception("Falha ao criar usuário no banco de dados.")
 
 def get_or_create_user(telegram_id: int, name: str) -> int:

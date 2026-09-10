@@ -74,10 +74,10 @@ def gerar_relatorio_por_formato(user_id: int, first_name: str, data_inicio: str,
 
 def _build_welcome(name: str, internal_id: int) -> str:
     return (
-        f"Olá {name}! Bem-vindo ao LekoAIFinance 🚀\n\n"
-        f"Seu cadastro foi realizado/confirmado com sucesso (ID Interno: {internal_id}).\n"
-        f"Em breve você poderá me enviar seus gastos e entradas e eu "
-        f"registrarei tudo automaticamente."
+        f"Olá {name}! 👋 Bem-vindo ao LekoAI Finance — seu assistente de finanças no Telegram. 🚀\n\n"
+        f"É só me mandar coisas como \"gastei 50 no mercado\" ou \"recebi 2000 de salário\" que eu "
+        f"registro tudo automaticamente. Quando quiser, é só pedir um relatório. 📊\n\n"
+        f"🆓 No plano Grátis: 20 lançamentos por mês + relatórios de até 7 dias."
     )
 
 
@@ -273,12 +273,19 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
     Roteia uma mensagem do usuário e retorna a lista de respostas (strings ou objetos de controle) a enviar.
     """
     try:
-        user_row = get_or_create_user_row(telegram_id=telegram_id, name=first_name)
+        user_row, is_new = get_or_create_user_row(telegram_id=telegram_id, name=first_name, retornar_criado=True)
         internal_id = user_row["id"]
 
         # Comando de boas-vindas / cadastro
         if text and text.strip().lower().startswith("/start"):
-            return [_build_welcome(first_name, internal_id)]
+            respostas = [_build_welcome(first_name, internal_id)]
+            if is_new:  # onboarding com os planos aparece só para usuário NOVO
+                respostas.append({
+                    "tipo": "botoes_planos",
+                    "mensagem": "💳 Quer lançamentos e relatórios ilimitados? Escolha um plano — "
+                                "ou é só começar a mandar seus gastos, de graça:",
+                })
+            return respostas
         
         # Comando /plano — mostra o plano atual e o uso do mês
         if text and text.strip().lower().startswith("/plano"):
