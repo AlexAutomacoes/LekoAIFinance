@@ -21,11 +21,13 @@ LIMITE_DIAS_RELATORIO_FREE = 7    # janela máxima de relatório no free
 # --- Ações que passam pelo gate ---------------------------------------------
 ACAO_REGISTRAR = "registrar"
 ACAO_RELATORIO = "relatorio"
+ACAO_CHAMADO = "chamado"      # abrir chamado é benefício de plano pago
 
 # --- Motivos de bloqueio (o paywall usa pra escolher a mensagem) ------------
 MOTIVO_COTA = "cota_estourada"
 MOTIVO_PERIODO = "periodo_longo"
 MOTIVO_EXPIRADO = "plano_expirado"
+MOTIVO_SO_PAGO = "exclusivo_pago"   # o free não tem cota nenhuma, é fechado
 
 
 @dataclass
@@ -88,6 +90,7 @@ def check_access(
       4. plano pago vencido (plus_* e já passou) -> BLOQUEADO (plano_expirado)
       5. free/registrar   -> liberado se lançamentos do mês < 20
          free/relatorio   -> liberado se período <= 7 dias
+         free/chamado     -> BLOQUEADO sempre (não há cota: é só dos pagos)
       6. senão            -> BLOQUEADO com o motivo
     """
     agora = agora or datetime.now(timezone.utc)
@@ -123,6 +126,12 @@ def check_access(
         return Verdict(periodo_dias <= LIMITE_DIAS_RELATORIO_FREE,
                        None if periodo_dias <= LIMITE_DIAS_RELATORIO_FREE else MOTIVO_PERIODO,
                        meta=meta)
+
+    # Abrir chamado é canal de suporte dos planos pagos. Diferente das outras
+    # duas ações, não tem cota no free: quem chega aqui já não é admin, nem
+    # vitalício, nem pagante em dia (os três saíram liberados lá em cima).
+    if acao == ACAO_CHAMADO:
+        return Verdict(False, MOTIVO_SO_PAGO)
 
     # 6) ação desconhecida: não travar um fluxo novo por engano
     return Verdict(True)
