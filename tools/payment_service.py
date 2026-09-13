@@ -41,12 +41,27 @@ PLANOS_PIX = {
     "lifetime":     {"amount": 20000, "descricao": "LekoAI Vitalicio"},
 }
 
+# Assinatura no cartão (renova sozinha). Cada plano aponta para um produto criado
+# no AbacatePay com o ciclo certo: MONTHLY no mensal, ANNUALLY no anual.
 PRODUTO_MENSAL = os.environ.get("ABACATEPAY_PRODUTO_MENSAL", "")
+PRODUTO_ANUAL = os.environ.get("ABACATEPAY_PRODUTO_ANUAL", "")
+PRODUTOS_CARTAO = {"plus_monthly": PRODUTO_MENSAL, "plus_annual": PRODUTO_ANUAL}
+
+# O cartão do AbacatePay é liberado por loja (hoje pausado para contas novas) —
+# enquanto não liberarem, a API responde "CARD is not available for this store".
+# A flag existe para o bot só oferecer cartão quando ele realmente funcionar.
+CARD_ENABLED = os.environ.get("ABACATEPAY_CARD_ENABLED", "false").strip().lower() in ("1", "true", "yes")
 
 EVENTOS_ATIVA = {"transparent.completed", "checkout.completed",
                  "subscription.completed", "subscription.renewed"}
 EVENTOS_REVOGA = {"transparent.refunded", "transparent.disputed", "transparent.lost",
                   "checkout.refunded", "checkout.disputed", "subscription.cancelled"}
+EVENTOS_AVISO = {"subscription.payment_failed"}
+
+
+def cartao_disponivel(plan_type: str) -> bool:
+    """True quando o plano pode ser pago no cartão (flag ligada + produto configurado)."""
+    return CARD_ENABLED and bool(PRODUTOS_CARTAO.get(plan_type))
 
 
 def _client():
@@ -102,13 +117,46 @@ def _assinatura_valida(headers, raw_body: bytes, query: dict = None) -> bool:
     return False
 
 
-def _expiracao(plan_type: str):
+def _expiracao(plan_type: str, vencimento_atual=None):
+    """
+    Nova data de vencimento do plano.
+
+    Conta a partir do vencimento atual quando ele ainda está no futuro — assim a
+    renovação da assinatura (ou um PIX pago adiantado) SOMA dias em vez de jogar
+    fora os que faltavam.
+    """
     agora = datetime.now(timezone.utc)
+    base = agora
+    if vencimento_atual:
+        try:
+            dt = datetime.fromisoformat(str(vencimento_atual).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            base = max(dt, agora)
+        except (ValueError, TypeError):
+            base = agora
     if plan_type == "plus_monthly":
-        return (agora + timedelta(days=30)).isoformat()
+        return (base + timedelta(days=30)).isoformat()
     if plan_type == "plus_annual":
-        return (agora + timedelta(days=365)).isoformat()
+        return (base + timedelta(days=365)).isoformat()
     return None  # lifetime e free não expiram
+
+
+def _chave_idempotencia(tipo: str, order_id, obj: dict, evento: dict) -> str:
+    """
+    Chave que impede processar o MESMO evento duas vezes.
+
+    PIX avulso: o id da cobrança já basta — cada compra tem o seu.
+    Assinatura (cartão): o id é o MESMO em toda renovação. Se a chave fosse só
+    ele, a 2ª mensalidade seria confundida com reenvio do webhook e o plano nunca
+    estenderia. Então juntamos um carimbo que muda a cada ciclo (próxima cobrança
+    / atualização / carimbo do evento) e se repete no reenvio do mesmo evento.
+    """
+    if not str(tipo).startswith("subscription."):
+        return str(order_id)
+    selo = (obj.get("nextChargeAt") or obj.get("updatedAt")
+            or evento.get("timestamp") or evento.get("createdAt") or "")
+    return f"{order_id}#{selo}" if selo else str(order_id)
 
 
 def _inferir_plano(obj: dict) -> str:
@@ -141,24 +189,27 @@ def handle_webhook(headers, raw_body: bytes, query: dict):
     plan_type = metadata.get("plan_type")
 
     if tipo in EVENTOS_ATIVA:
-        return _ativar(order_id, external_id, plan_type, obj, evento)
+        return _ativar(order_id, external_id, plan_type, obj, evento, tipo)
     if tipo in EVENTOS_REVOGA:
         return _revogar(order_id, evento)
+    if tipo in EVENTOS_AVISO:
+        return _avisar_falha(external_id, tipo)
 
     logging.info("webhook ignorado (type=%s)", tipo)
     return 200, {"ignorado": tipo}, None
 
 
-def _ativar(order_id, external_id, plan_type, obj, evento):
+def _ativar(order_id, external_id, plan_type, obj, evento, tipo=""):
     if not order_id:
         return 400, {"error": "sem id da cobranca"}, None
 
     supabase = _client()
+    chave = _chave_idempotencia(tipo, order_id, obj, evento)
 
-    # idempotência: mesmo order_id já pago não repete (reenvio do webhook)
-    ja = supabase.table("pagamentos").select("status").eq("order_id", str(order_id)).execute()
+    # idempotência: mesmo evento já processado não repete (reenvio do webhook)
+    ja = supabase.table("pagamentos").select("status").eq("order_id", chave).execute()
     if ja.data and ja.data[0].get("status") == "pago":
-        logging.info("webhook idempotente (order_id=%s já pago)", order_id)
+        logging.info("webhook idempotente (chave=%s já paga)", chave)
         return 200, {"idempotente": True}, None
 
     plan_type = plan_type or _inferir_plano(obj)
@@ -170,12 +221,17 @@ def _ativar(order_id, external_id, plan_type, obj, evento):
     except (ValueError, TypeError):
         tg = None
     user_id = None
+    atual = {}
     if tg is not None:
-        r = supabase.table("users").select("id").eq("telegram_id", tg).execute()
-        user_id = r.data[0]["id"] if r.data else None
+        r = (supabase.table("users")
+             .select("id, plan_type, subscription_expires_at")
+             .eq("telegram_id", tg).execute())
+        if r.data:
+            atual = r.data[0]
+            user_id = atual["id"]
 
     registro = {
-        "order_id": str(order_id),
+        "order_id": chave,
         "external_id": str(external_id) if external_id is not None else None,
         "plan_type": plan_type,
         "status": "pago",
@@ -189,10 +245,49 @@ def _ativar(order_id, external_id, plan_type, obj, evento):
         logging.warning("pagamento pago mas usuário não encontrado (externalId=%s).", external_id)
         return 200, {"pago_sem_usuario": True}, None
 
-    aplicar_plano(user_id, plan_type, _expiracao(plan_type))
+    # vitalício não vira mensal/anual por causa de uma compra posterior
+    if atual.get("plan_type") == "lifetime" and plan_type != "lifetime":
+        logging.warning("usuário %s já é vitalício — pagamento registrado sem mexer no plano.", user_id)
+        return 200, {"pago_sem_alterar_plano": True}, None
+
+    aplicar_plano(user_id, plan_type, _expiracao(plan_type, atual.get("subscription_expires_at")))
+    renovacao = str(tipo).endswith(".renewed")
     notificar = {"telegram_id": tg,
-                 "texto": "✅ Pagamento confirmado! Seu plano foi ativado. Obrigado! 🎉"}
+                 "texto": ("🔄 Renovação confirmada! Seu plano continua ativo. Obrigado! 🎉"
+                           if renovacao else
+                           "✅ Pagamento confirmado! Seu plano foi ativado. Obrigado! 🎉")}
     return 200, {"ativado": True, "plan_type": plan_type}, notificar
+
+
+def _avisar_falha(external_id, tipo):
+    """
+    Cobrança do cartão recusada (`subscription.payment_failed`): avisa o usuário.
+    NÃO revoga — o acesso já pago continua valendo até vencer sozinho.
+    """
+    try:
+        tg = int(external_id)
+    except (ValueError, TypeError):
+        logging.warning("evento %s sem externalId utilizável.", tipo)
+        return 200, {"aviso_sem_usuario": True}, None
+    return 200, {"aviso": tipo}, {
+        "telegram_id": tg,
+        "texto": ("⚠️ A cobrança no seu cartão não passou. Seu acesso continua até o fim do "
+                  "período já pago. Você pode tentar de novo — ou pagar por PIX — em /assinar."),
+    }
+
+
+def _linha_pagamento(supabase, order_id):
+    """
+    Acha o pagamento pelo id da cobrança. Assinatura grava a chave composta
+    '<id>#<ciclo>' (ver _chave_idempotencia), então procura pelo prefixo quando o
+    id exato não existir — pegando o ciclo mais recente.
+    """
+    r = supabase.table("pagamentos").select("id, user_id, order_id").eq("order_id", str(order_id)).execute()
+    if r.data:
+        return r.data[0]
+    r = (supabase.table("pagamentos").select("id, user_id, order_id")
+         .like("order_id", f"{order_id}#%").order("id", desc=True).limit(1).execute())
+    return r.data[0] if r.data else None
 
 
 def _revogar(order_id, evento):
@@ -200,10 +295,11 @@ def _revogar(order_id, evento):
 
     user_id = None
     if order_id:
-        r = supabase.table("pagamentos").select("user_id").eq("order_id", str(order_id)).execute()
-        if r.data:
-            user_id = r.data[0].get("user_id")
-        supabase.table("pagamentos").update({"status": "estornado"}).eq("order_id", str(order_id)).execute()
+        linha = _linha_pagamento(supabase, order_id)
+        if linha:
+            user_id = linha.get("user_id")
+            (supabase.table("pagamentos").update({"status": "estornado"})
+             .eq("order_id", linha["order_id"]).execute())
 
     notificar = None
     if user_id is not None:
@@ -259,19 +355,21 @@ def criar_cobranca_pix(plan_type: str, telegram_id: int) -> dict:
         "plan_type": plan_type,
     }
 
-def criar_assinatura_cartao(telegram_id: int) -> dict:
+def criar_assinatura_cartao(plan_type: str, telegram_id: int) -> dict:
     """
-    Cria um checkout de ASSINATURA (cartão, Plus mensal) no AbacatePay.
-    Passa externalId + metadata (= telegram_id) para o webhook ligar ao usuário.
+    Cria uma ASSINATURA no cartão (checkout hospedado) para o plano mensal ou anual.
+    Renova sozinha: `subscription.renewed` estende o plano, `subscription.cancelled`
+    revoga. Passa externalId + metadata (= telegram_id) para o webhook ligar ao usuário.
     Devolve {"id", "url", "plan_type"}.
     """
-    if not PRODUTO_MENSAL:
-        raise ValueError("ABACATEPAY_PRODUTO_MENSAL não configurado no .env")
+    produto = PRODUTOS_CARTAO.get(plan_type)
+    if not produto:
+        raise ValueError(f"Plano sem produto de assinatura configurado: {plan_type}")
     resp = _post_abacate("/v2/subscriptions/create", {
-        "items": [{"id": PRODUTO_MENSAL, "quantity": 1}],
+        "items": [{"id": produto, "quantity": 1}],
         "methods": ["CARD"],
         "externalId": str(telegram_id),
-        "metadata": {"externalId": str(telegram_id), "plan_type": "plus_monthly"},
+        "metadata": {"externalId": str(telegram_id), "plan_type": plan_type},
     })
     d = resp.get("data") or {}
-    return {"id": d.get("id"), "url": d.get("url"), "plan_type": "plus_monthly"}
+    return {"id": d.get("id"), "url": d.get("url"), "plan_type": plan_type}
