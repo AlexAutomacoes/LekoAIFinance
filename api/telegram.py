@@ -114,6 +114,67 @@ def send_plan_buttons(chat_id: int, text: str) -> None:
     except Exception as e:
         logging.error(f"Falha ao enviar botões de planos: {e}")
 
+def send_payment_method_buttons(chat_id: int, text: str, plan_type: str) -> None:
+    """Botões da forma de pagamento (PIX x cartão) de um plano."""
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "📱 PIX", "callback_data": f"pay_pix|{plan_type}"},
+                {"text": "💳 Cartão", "callback_data": f"pay_card|{plan_type}"},
+            ]
+        ]
+    }
+    payload = json.dumps({"chat_id": chat_id, "text": text, "reply_markup": keyboard}).encode("utf-8")
+    req = urllib.request.Request(f"{API_BASE}/sendMessage", data=payload,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=15)
+    except Exception as e:
+        logging.error(f"Falha ao enviar botões de pagamento: {e}")
+
+
+def send_link_button(chat_id: int, text: str, label: str, url: str) -> None:
+    """Envia um botão que ABRE UMA URL (checkout do cartão) — não gera callback."""
+    keyboard = {"inline_keyboard": [[{"text": label, "url": url}]]}
+    payload = json.dumps({"chat_id": chat_id, "text": text, "reply_markup": keyboard}).encode("utf-8")
+    req = urllib.request.Request(f"{API_BASE}/sendMessage", data=payload,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=15)
+    except Exception as e:
+        logging.error(f"Falha ao enviar botão de link: {e}")
+
+
+def enviar_respostas(chat_id: int, respostas) -> None:
+    """
+    Manda ao Telegram o que a Camada 2 devolveu: texto (str) ou "control dict".
+    Um ponto só porque os três caminhos — mensagem de texto, clique de formato e
+    clique de plano — produzem os mesmos tipos de resposta.
+    """
+    for resposta in respostas:
+        if not isinstance(resposta, dict):
+            send_message(chat_id, resposta)
+            continue
+
+        tipo = resposta.get("tipo")
+        if tipo == "documento":
+            send_document(chat_id, resposta["caminho"], resposta.get("legenda", ""))
+        elif tipo == "botoes_formato":
+            send_message_with_buttons(chat_id, resposta["mensagem"],
+                                      resposta["data_inicio"], resposta["data_fim"])
+        elif tipo == "botoes_planos":
+            send_plan_buttons(chat_id, resposta["mensagem"])
+        elif tipo == "botoes_pagamento":
+            send_payment_method_buttons(chat_id, resposta["mensagem"], resposta["plano"])
+        elif tipo == "botao_link":
+            send_link_button(chat_id, resposta["mensagem"],
+                             resposta["texto_botao"], resposta["url"])
+        elif tipo == "foto_pix":
+            send_photo(chat_id, resposta["base64"], resposta.get("legenda", ""))
+        else:
+            logging.warning(f"Tipo de resposta desconhecido: {tipo}")
+
+
 def answer_callback_query(callback_query_id: str) -> None:
     """Responde o callback query para tirar o estado de carregamento do botão no Telegram."""
     payload = json.dumps({"callback_query_id": callback_query_id}).encode("utf-8")
@@ -261,20 +322,25 @@ class handler(BaseHTTPRequestHandler):
                         data_fim=data_fim,
                         formato=formato,
                     )
-                    for resposta in respostas:
-                        if isinstance(resposta, dict) and resposta.get("tipo") == "documento":
-                            send_document(chat_id, resposta["caminho"], resposta.get("legenda", ""))
-                        else:
-                            send_message(chat_id, resposta)
+                    enviar_respostas(chat_id, respostas)
 
+                # Clique no plano: pergunta a forma de pagamento (ou já manda o PIX)
                 if data.startswith("buy|") and chat_id:
                     plano = data.split("|", 1)[1]
+                    from tools.message_handler import gerar_escolha_pagamento
+                    enviar_respostas(chat_id, gerar_escolha_pagamento(plano, user.get("id", chat_id)))
+
+                # Escolheu PIX
+                if data.startswith("pay_pix|") and chat_id:
+                    plano = data.split("|", 1)[1]
                     from tools.message_handler import gerar_cobranca_resposta
-                    for resposta in gerar_cobranca_resposta(plano, user.get("id", chat_id)):
-                        if isinstance(resposta, dict) and resposta.get("tipo") == "foto_pix":
-                            send_photo(chat_id, resposta["base64"], resposta.get("legenda", ""))
-                        else:
-                            send_message(chat_id, resposta)
+                    enviar_respostas(chat_id, gerar_cobranca_resposta(plano, user.get("id", chat_id)))
+
+                # Escolheu cartão (assinatura que renova sozinha)
+                if data.startswith("pay_card|") and chat_id:
+                    plano = data.split("|", 1)[1]
+                    from tools.message_handler import gerar_checkout_cartao_resposta
+                    enviar_respostas(chat_id, gerar_checkout_cartao_resposta(plano, user.get("id", chat_id)))
 
                 self._reply(200, "ok")
                 return
@@ -290,24 +356,7 @@ class handler(BaseHTTPRequestHandler):
             telegram_id = user.get("id", chat_id)
             first_name = user.get("first_name", "")
 
-            for resposta in process_message(text, telegram_id, first_name):
-                if isinstance(resposta, dict):
-                    tipo = resposta.get("tipo")
-                    if tipo == "documento":
-                        send_document(chat_id, resposta["caminho"], resposta.get("legenda", ""))
-                    elif tipo == "botoes_formato":
-                        send_message_with_buttons(
-                            chat_id,
-                            resposta["mensagem"],
-                            resposta["data_inicio"],
-                            resposta["data_fim"]
-                        )
-                    elif tipo == "botoes_planos":
-                        send_plan_buttons(chat_id, resposta["mensagem"])
-                    elif tipo == "foto_pix":
-                        send_photo(chat_id, resposta["base64"], resposta.get("legenda", ""))
-                else:
-                    send_message(chat_id, resposta)
+            enviar_respostas(chat_id, process_message(text, telegram_id, first_name))
 
             self._reply(200, "ok")
         except Exception as err:
