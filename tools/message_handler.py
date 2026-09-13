@@ -28,7 +28,9 @@ from tools.subscription import (
     LIMITE_DIAS_RELATORIO_FREE,
     MOTIVO_COTA,
     MOTIVO_PERIODO,
-    MOTIVO_EXPIRADO
+    MOTIVO_EXPIRADO,
+    MOTIVO_SO_PAGO,
+    ACAO_CHAMADO,
 )
 from tools.payment_service import criar_cobranca_pix
 
@@ -89,7 +91,7 @@ def _build_welcome(name: str, internal_id: int) -> str:
         f"É só me mandar coisas como \"gastei 50 no mercado\" ou \"recebi 2000 de salário\" que eu "
         f"registro tudo automaticamente. Quando quiser, é só pedir um relatório. 📊\n\n"
         f"🆓 No plano Grátis: 20 lançamentos por mês + relatórios de até 7 dias.\n\n"
-        f"🛠️ Achou algum problema? Manda /chamado que eu registro para a equipe."
+        f"🛠️ Nos planos pagos você ainda abre chamado direto com a equipe: /chamado"
     )
 
 
@@ -263,6 +265,9 @@ def _msg_bloqueio(verdict) -> str:
     if verdict.motivo == MOTIVO_PERIODO:
         limite = verdict.meta.get("limite", LIMITE_DIAS_RELATORIO_FREE)
         return (f"⛔ No plano Grátis os relatórios cobrem até {limite} dias." + hint)
+    if verdict.motivo == MOTIVO_SO_PAGO:
+        return ("⛔ Abrir chamado é um benefício dos planos pagos.\n"
+                "Assinando, você fala direto com a equipe quando algo dá errado." + hint)
     return "⛔ Este recurso é exclusivo dos planos pagos." + hint
 
 def _gate(user_row, acao, contexto, *, lancamentos_mes=0, periodo_dias=0):
@@ -338,6 +343,12 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
         # Vem antes de todo o resto porque, enquanto o rascunho está aberto, a
         # próxima mensagem é a RESPOSTA da pergunta — não pode ir para a IA.
         if comando.startswith("/chamado"):
+            # Gate: abrir chamado é benefício dos planos pagos. Só na entrada —
+            # quem já respondeu a 1a pergunta termina o fluxo (e o rascunho
+            # morre sozinho em 30 min).
+            bloqueio = _gate(user_row, ACAO_CHAMADO, "chamado")
+            if bloqueio:
+                return [bloqueio]
             salvar_rascunho_chamado(internal_id, "problema")
             return [PERGUNTA_PROBLEMA]
 
