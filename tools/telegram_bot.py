@@ -52,7 +52,10 @@ async def _enviar_resposta(update: Update, resposta):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lida com o comando /start (delega para a Camada 2 — process_message)."""
     user = update.effective_user
-    for resposta in process_message("/start", user.id, user.first_name):
+    # Passa o texto INTEIRO (não só "/start") para o payload do deep link
+    # do quiz chegar na Camada 2.
+    texto = update.message.text if update.message and update.message.text else "/start"
+    for resposta in process_message(texto, user.id, user.first_name):
         await _enviar_resposta(update, resposta)
 
 
