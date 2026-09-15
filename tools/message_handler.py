@@ -33,6 +33,7 @@ from tools.subscription import (
     ACAO_CHAMADO,
 )
 from tools.payment_service import criar_cobranca_pix, criar_assinatura_cartao, cartao_disponivel
+from tools.quiz_link import vincular_telegram
 
 # Acima deste nº de dias, o relatório vira arquivo (PDF/Excel) em vez de texto no chat ("mais de 1 semana").
 LIMITE_DIAS_PDF = 7
@@ -415,6 +416,10 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
 
         # Comando de boas-vindas / cadastro
         if text and text.strip().lower().startswith("/start"):
+            # Deep link do quiz ("/start q_<uuid>"): carimba o telegram_id lá no
+            # Supabase do quiz. Blindado — se falhar, o /start segue normal.
+            vincular_telegram(texto, telegram_id)
+
             respostas = [_build_welcome(first_name, internal_id)]
             if is_new:  # onboarding com os planos aparece só para usuário NOVO
                 respostas.append({
