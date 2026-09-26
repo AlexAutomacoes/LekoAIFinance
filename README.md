@@ -27,8 +27,8 @@ para interpretar intenção; o armazenamento e a comunicação são determiníst
 | **2 — Navegação (IA)** | Interpreta a mensagem e decide a ação (Groq / Llama 3.3) | [`tools/llm_router.py`](tools/llm_router.py) |
 | **3 — Ferramentas** | Telegram + Supabase (determinístico) | [`tools/telegram_bot.py`](tools/telegram_bot.py), [`tools/db_manager.py`](tools/db_manager.py) |
 
-> A Constituição completa do projeto (schemas de dados, regras e invariantes) está em
-> [`GEMINI.md`](GEMINI.md).
+> O contexto completo do projeto (schemas de dados, regras, invariantes, paywall e
+> segurança) está em [`AGENTS.md`](AGENTS.md) — é também o que os agentes de IA leem.
 
 ## 🧰 Stack
 
@@ -164,21 +164,29 @@ Passo a passo completo em [`architecture/pop_deploy_vercel.md`](architecture/pop
 
 ```
 LekoAIFinance/
-├── GEMINI.md            # Constituição do projeto (schemas, regras, invariantes)
+├── AGENTS.md            # Contexto do projeto (schemas, regras, invariantes, paywall)
 ├── README.md            # Este arquivo
 ├── .env.example         # Modelo de variáveis de ambiente
 ├── requirements.txt     # Dependências Python
+├── vercel.json          # Config do deploy serverless
+├── api/
+│   └── telegram.py      # Entrypoint ÚNICO da Vercel (telegram/chamados/pagamento)
 ├── architecture/        # Camada 1 — POPs (procedimentos operacionais)
-├── tools/               # Camada 3 — scripts Python (Telegram, Supabase, IA)
-│   ├── telegram_bot.py
-│   ├── llm_router.py
-│   ├── db_manager.py
-│   └── test_supabase.py
-├── task_plan.md         # Memória: fases e checklists (V.L.A.E.G.)
-├── findings.md          # Memória: descobertas e restrições
-└── progress.md          # Memória: log de atividades
+├── sql/                 # Migrações do Supabase (idempotentes e aditivas)
+├── public/
+│   └── dashboard.html   # Dashboard de chamados
+├── docs_monetizacao/    # Documentos de produto da monetização
+├── .kiro/agents/        # Agente de IA de suporte N1
+└── tools/               # Camadas 2 e 3 — Python (IA, Telegram, Supabase, pagamento)
+    ├── message_handler.py
+    ├── llm_router.py
+    ├── db_manager.py
+    ├── subscription.py
+    ├── payment_service.py
+    ├── chamados_service.py
+    ├── suporte_n1.py
+    ├── quiz_link.py
+    ├── pdf_report.py
+    ├── excel_report.py
+    └── telegram_bot.py
 ```
-
----
-
-Construído sob o protocolo **V.L.A.E.G.** (Visão, Link, Arquitetura, Estilo, Gatilho).
