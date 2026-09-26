@@ -1,6 +1,14 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
+
+# Node (o dashboard antigo versionou 5.987 arquivos aqui — nunca mais)
+node_modules/
+
+# Segredos
 .env
+
+# SO / temporarios
 .DS_Store
 .tmp/
