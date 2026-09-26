@@ -3,101 +3,223 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LekoAI Test Dashboard</title>
+  <title>LekoAI — Central de Atendimento</title>
   <style>
+    /* ====================================================================
+       Layout no padrao de helpdesk (Freshdesk/Zendesk): sidebar fixa com as
+       filas a esquerda, area de trabalho a direita. Tema claro de proposito
+       -- e o que da a leitura de "ferramenta de atendimento" e o que deixa
+       os selos de status legiveis a distancia.
+       ==================================================================== */
+    :root {
+      --sidebar: #12344d;        /* navy da sidebar */
+      --sidebar-hover: #1b4a6b;
+      --sidebar-active: #2a6f97;
+      --bg: #f4f6f8;
+      --surface: #ffffff;
+      --border: #dfe4e8;
+      --text: #22303c;
+      --text-muted: #6b7c8c;
+      --primary: #2a6f97;
+      --aberto: #e8590c;
+      --atendendo: #1971c2;
+      --resolvido: #2f9e44;
+      --erro: #e03131;
+      --latencia: #f08c00;
+      --melhoria: #1971c2;
+      --status: #2f9e44;
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; padding: 24px; }
-    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid #0f3460; }
-    .header h1 { font-size: 24px; background: linear-gradient(135deg, #4fc3f7, #7c4dff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-    .header .last-update { font-size: 12px; color: #888; }
-    .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
-    .stat-card { background: #16213e; border-radius: 12px; padding: 20px; border: 1px solid #0f3460; transition: transform 0.2s; }
-    .stat-card:hover { transform: translateY(-2px); }
-    .stat-card .label { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 1px; }
-    .stat-card .value { font-size: 28px; font-weight: 700; margin-top: 8px; }
-    .stat-card .value.erro { color: #ef5350; }
-    .stat-card .value.latencia { color: #ffa726; }
-    .stat-card .value.ok { color: #66bb6a; }
-    .filter-bar { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
-    .filter-bar .group { display: flex; gap: 4px; background: #16213e; border-radius: 8px; padding: 4px; }
-    .filter-bar .group-label { font-size: 11px; color: #888; padding: 6px 8px; align-self: center; }
-    .filter-btn { padding: 6px 14px; border: none; border-radius: 6px; background: transparent; color: #aaa; cursor: pointer; font-size: 13px; transition: all 0.2s; }
-    .filter-btn:hover { color: #fff; background: #0f3460; }
-    .filter-btn.active { background: #0f3460; color: #4fc3f7; font-weight: 600; }
-    .table-container { background: #16213e; border-radius: 12px; border: 1px solid #0f3460; overflow: hidden; }
-    table { width: 100%; border-collapse: collapse; }
-    th { background: #0f3460; padding: 12px 16px; text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: #888; }
-    td { padding: 12px 16px; border-top: 1px solid #1a1a2e; font-size: 14px; vertical-align: middle; }
-    tr.chamado-row { cursor: pointer; transition: background 0.15s; }
-    tr.chamado-row:hover td { background: rgba(79, 195, 247, 0.05); }
-    .badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
-    .badge-erro { background: rgba(239,83,80,0.15); color: #ef5350; }
-    .badge-latencia { background: rgba(255,167,38,0.15); color: #ffa726; }
-    .badge-melhoria { background: rgba(79,195,247,0.15); color: #4fc3f7; }
-    .badge-status { background: rgba(102,187,106,0.15); color: #66bb6a; }
-    .status-aberto { background: rgba(255,167,38,0.15); color: #ffa726; }
-    .status-resolvido { background: rgba(102,187,106,0.15); color: #66bb6a; }
-    .status-ignorado { background: rgba(158,158,158,0.15); color: #9e9e9e; }
-    .actions { display: flex; gap: 6px; }
-    .action-btn { padding: 4px 10px; border: none; border-radius: 6px; font-size: 11px; cursor: pointer; transition: all 0.2s; font-weight: 500; }
-    .btn-resolver { background: rgba(102,187,106,0.15); color: #66bb6a; }
-    .btn-resolver:hover { background: rgba(102,187,106,0.3); }
-    .btn-ignorar { background: rgba(158,158,158,0.15); color: #9e9e9e; }
-    .btn-ignorar:hover { background: rgba(158,158,158,0.3); }
-    .btn-deletar { background: rgba(239,83,80,0.1); color: #ef5350; }
-    .btn-deletar:hover { background: rgba(239,83,80,0.25); }
-    .detail-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999; opacity: 0; visibility: hidden; transition: all 0.3s; }
-    .detail-overlay.open { opacity: 1; visibility: visible; }
-    .detail-panel { position: fixed; top: 0; right: -500px; width: 500px; max-width: 90vw; height: 100%; background: #16213e; border-left: 1px solid #0f3460; z-index: 1000; transition: right 0.3s ease; display: flex; flex-direction: column; box-shadow: -4px 0 24px rgba(0,0,0,0.4); }
-    .detail-panel.open { right: 0; }
-    .detail-header { display: flex; justify-content: space-between; align-items: center; padding: 20px 24px; border-bottom: 1px solid #0f3460; }
-    .detail-header h2 { font-size: 16px; }
-    .detail-close { background: none; border: none; color: #888; font-size: 24px; cursor: pointer; padding: 4px 8px; border-radius: 6px; }
-    .detail-close:hover { background: #0f3460; color: #fff; }
-    .detail-body { flex: 1; overflow-y: auto; padding: 24px; }
-    .detail-field { margin-bottom: 20px; }
-    .detail-field .field-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #888; margin-bottom: 6px; }
-    .detail-field .field-value { font-size: 14px; color: #e0e0e0; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
-    .detail-field .field-value.description-box { background: #1a1a2e; border: 1px solid #0f3460; border-radius: 8px; padding: 16px; font-family: 'Consolas', monospace; font-size: 13px; max-height: 300px; overflow-y: auto; }
-    .detail-actions { padding: 20px 24px; border-top: 1px solid #0f3460; display: flex; gap: 10px; }
-    .detail-actions .action-btn { padding: 10px 20px; font-size: 13px; border-radius: 8px; }
-    .detail-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    .resolution-box { background: rgba(102,187,106,0.08); border: 1px solid rgba(102,187,106,0.2); border-radius: 8px; padding: 12px 16px; }
-    .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(100px); background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 12px 20px; font-size: 14px; box-shadow: 0 8px 32px rgba(0,0,0,0.4); opacity: 0; transition: all 0.3s ease; z-index: 2000; }
-    .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
-    .empty-state { text-align: center; padding: 60px 20px; color: #666; }
-    .empty-state .icon { font-size: 48px; margin-bottom: 16px; }
-    .empty-state p { font-size: 16px; }
-    .setup-banner { background: rgba(255,167,38,0.1); border: 1px solid rgba(255,167,38,0.3); border-radius: 8px; padding: 16px; margin-bottom: 20px; font-size: 13px; color: #ffa726; display: none; }
-    .header-right { display: flex; align-items: center; gap: 12px; }
-    .user-chip { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border: 1px solid #0f3460; border-radius: 8px; background: #16213e; font-size: 12px; color: #9e9e9e; }
-    .user-chip .email { color: #66bb6a; }
-    .user-chip .role { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: #888; }
-    .link-btn { background: none; border: none; color: #4fc3f7; font-size: 12px; cursor: pointer; padding: 2px 4px; }
-    .link-btn:hover { text-decoration: underline; }
-    body.readonly .btn-resolver, body.readonly .btn-ignorar, body.readonly .btn-deletar { display: none; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px;
+    }
+    .app { display: flex; min-height: 100vh; }
 
-    /* ---- tela de login ---- */
-    .login-overlay { position: fixed; inset: 0; background: #1a1a2e; z-index: 3000; display: flex; align-items: center; justify-content: center; padding: 24px; }
+    /* ---------------- Sidebar ---------------- */
+    .sidebar {
+      width: 240px; flex-shrink: 0; background: var(--sidebar); color: #cfe0ec;
+      display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh;
+    }
+    .brand { padding: 20px 18px; font-size: 15px; font-weight: 700; color: #fff;
+             border-bottom: 1px solid rgba(255,255,255,0.1); letter-spacing: .3px; }
+    .brand span { display: block; font-size: 11px; font-weight: 500; color: #8fb4cc;
+                  margin-top: 3px; letter-spacing: .5px; text-transform: uppercase; }
+    .nav { padding: 12px 10px; flex: 1; overflow-y: auto; }
+    .nav-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 1px;
+                 color: #7ba0b8; padding: 14px 10px 6px; font-weight: 600; }
+    .nav-item {
+      display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+      padding: 10px 12px; border: none; background: none; color: #cfe0ec;
+      border-radius: 6px; cursor: pointer; font-size: 13.5px; font-family: inherit;
+      transition: background .15s;
+    }
+    .nav-item:hover { background: var(--sidebar-hover); }
+    .nav-item.active { background: var(--sidebar-active); color: #fff; font-weight: 600; }
+    .nav-item .ico { width: 18px; text-align: center; flex-shrink: 0; }
+    .nav-item .txt { flex: 1; }
+    .nav-item .count {
+      background: rgba(255,255,255,0.16); color: #fff; border-radius: 10px;
+      padding: 1px 8px; font-size: 11.5px; font-weight: 700; min-width: 22px; text-align: center;
+    }
+    .nav-item.active .count { background: #fff; color: var(--sidebar-active); }
+    .nav-item .count.zero { opacity: .45; }
+    .sidebar-foot { padding: 12px 16px; border-top: 1px solid rgba(255,255,255,0.1);
+                    font-size: 11.5px; color: #8fb4cc; }
+    .sidebar-foot .email { display: block; color: #cfe0ec; word-break: break-all; margin-bottom: 2px; }
+    .link-btn { background: none; border: none; color: #8fb4cc; cursor: pointer;
+                font-size: 11.5px; text-decoration: underline; padding: 0; font-family: inherit; }
+    .link-btn:hover { color: #fff; }
+
+    /* ---------------- Area principal ---------------- */
+    .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    .topbar {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 16px 24px 0; position: sticky; top: 0; z-index: 5;
+    }
+    .topbar-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+    .topbar h1 { font-size: 19px; font-weight: 600; }
+    .topbar .sub { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; }
+    .spacer { flex: 1; }
+    .search {
+      padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px;
+      font-size: 13px; width: 260px; font-family: inherit; background: var(--bg);
+    }
+    .search:focus { outline: none; border-color: var(--primary); background: #fff; }
+    .icon-btn {
+      border: 1px solid var(--border); background: var(--surface); border-radius: 6px;
+      padding: 8px 12px; cursor: pointer; font-size: 13px; color: var(--text); font-family: inherit;
+    }
+    .icon-btn:hover { background: var(--bg); }
+    .tabs { display: flex; gap: 2px; margin-top: 14px; }
+    .tab {
+      border: none; background: none; padding: 10px 16px; cursor: pointer;
+      font-size: 13.5px; color: var(--text-muted); border-bottom: 2px solid transparent;
+      font-family: inherit;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+    .tab .n { color: var(--text-muted); font-size: 12px; margin-left: 4px; }
+
+    .banner { margin: 16px 24px 0; background: #fff4e6; border: 1px solid #ffd8a8;
+              color: #b35309; border-radius: 6px; padding: 11px 14px; font-size: 13px; display: none; }
+
+    /* ---------------- Lista de tickets ---------------- */
+    .list { padding: 16px 24px 32px; }
+    .ticket {
+      display: flex; gap: 14px; align-items: flex-start; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px;
+      margin-bottom: 8px; cursor: pointer; transition: box-shadow .15s, border-color .15s;
+    }
+    .ticket:hover { box-shadow: 0 2px 8px rgba(0,0,0,.07); border-color: #c3cdd6; }
+    .avatar {
+      width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0; color: #fff;
+      display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px;
+    }
+    .ticket-body { flex: 1; min-width: 0; }
+    .ticket-title { font-weight: 600; font-size: 14.5px; margin-bottom: 4px; line-height: 1.35; }
+    .ticket-meta { font-size: 12.5px; color: var(--text-muted); display: flex;
+                   flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+    .ticket-side { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; flex-shrink: 0; }
+    .pill { display: inline-block; padding: 3px 9px; border-radius: 11px;
+            font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
+    .pill-aberto     { background: #fff0e6; color: var(--aberto); }
+    .pill-atendendo  { background: #e7f1fb; color: var(--atendendo); }
+    .pill-resolvido  { background: #e9f7ee; color: var(--resolvido); }
+    .pill-erro       { background: #ffecec; color: var(--erro); }
+    .pill-latencia   { background: #fff6e0; color: var(--latencia); }
+    .pill-melhoria   { background: #e7f1fb; color: var(--melhoria); }
+    .pill-status     { background: #e9f7ee; color: var(--status); }
+    .pill-n2         { background: #f3e8fd; color: #7048e8; }
+    .pill-cliente    { background: #e7f1fb; color: var(--primary); }
+    .empty { text-align: center; padding: 70px 20px; color: var(--text-muted); }
+    .empty .ico { font-size: 44px; display: block; margin-bottom: 12px; }
+
+    /* ---------------- Painel de detalhe ---------------- */
+    .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.35); opacity: 0;
+               pointer-events: none; transition: opacity .2s; z-index: 20; }
+    .overlay.open { opacity: 1; pointer-events: auto; }
+    .panel {
+      position: fixed; top: 0; right: 0; width: 560px; max-width: 100%; height: 100vh;
+      background: var(--surface); z-index: 21; transform: translateX(100%);
+      transition: transform .22s ease; display: flex; flex-direction: column;
+      box-shadow: -4px 0 20px rgba(0,0,0,.12);
+    }
+    .panel.open { transform: translateX(0); }
+    .panel-head { padding: 18px 22px; border-bottom: 1px solid var(--border);
+                  display: flex; align-items: center; justify-content: space-between; }
+    .panel-head h2 { font-size: 16px; font-weight: 600; }
+    .panel-close { border: none; background: none; font-size: 26px; line-height: 1;
+                   cursor: pointer; color: var(--text-muted); }
+    .panel-body { padding: 20px 22px; overflow-y: auto; flex: 1; }
+    .panel-foot { padding: 14px 22px; border-top: 1px solid var(--border);
+                  display: flex; gap: 8px; flex-wrap: wrap; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }
+    .field { margin-bottom: 16px; }
+    .field-label { font-size: 11px; text-transform: uppercase; letter-spacing: .6px;
+                   color: var(--text-muted); font-weight: 600; margin-bottom: 5px; }
+    .field-value { font-size: 13.5px; line-height: 1.55; }
+    .box { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+           padding: 12px 14px; white-space: pre-wrap; word-break: break-word; font-size: 13px; }
+    .box.nota { background: #f6f0ff; border-color: #ddd0f7; }
+
+    .btn { border: 1px solid var(--border); background: var(--surface); border-radius: 6px;
+           padding: 9px 14px; cursor: pointer; font-size: 13px; font-weight: 500;
+           font-family: inherit; color: var(--text); }
+    .btn:hover { background: var(--bg); }
+    .btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+    .btn-primary:hover { background: #245f81; }
+    .btn-ok { background: var(--resolvido); border-color: var(--resolvido); color: #fff; }
+    .btn-ok:hover { background: #2b8a3e; }
+    .btn-danger { color: var(--erro); border-color: #ffc9c9; }
+    .btn-danger:hover { background: #fff5f5; }
+    /* Quem tem role 'leitor' ve tudo, mas nao age. */
+    body.readonly .acao { display: none !important; }
+
+    /* ---------------- Login ---------------- */
+    .login-overlay { position: fixed; inset: 0; background: var(--sidebar);
+                     display: flex; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
     .login-overlay[hidden] { display: none; }
-    .login-card { width: 100%; max-width: 380px; background: #16213e; border: 1px solid #0f3460; border-radius: 14px; padding: 32px; }
-    .login-card h2 { font-size: 20px; margin-bottom: 6px; background: linear-gradient(135deg, #4fc3f7, #7c4dff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-    .login-card .sub { font-size: 12.5px; color: #888; margin-bottom: 22px; line-height: 1.5; }
-    .login-card label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #888; margin-bottom: 6px; }
-    .login-card input { width: 100%; padding: 11px 13px; margin-bottom: 16px; background: #1a1a2e; border: 1px solid #0f3460; border-radius: 8px; color: #e0e0e0; font-size: 14px; }
-    .login-card input:focus { outline: none; border-color: #4fc3f7; }
-    .login-card button[type="submit"] { width: 100%; padding: 12px; border: none; border-radius: 8px; background: #0f3460; color: #4fc3f7; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
-    .login-card button[type="submit"]:hover:not(:disabled) { background: #14487f; color: #fff; }
-    .login-card button[type="submit"]:disabled { opacity: 0.5; cursor: wait; }
-    .login-erro { background: rgba(239,83,80,0.1); border: 1px solid rgba(239,83,80,0.3); border-radius: 8px; padding: 11px 14px; font-size: 12.5px; color: #ef5350; margin-bottom: 16px; line-height: 1.5; }
+    .login-card { background: #fff; border-radius: 10px; padding: 34px 30px;
+                  width: 100%; max-width: 380px; box-shadow: 0 10px 40px rgba(0,0,0,.3); }
+    .login-card h2 { font-size: 19px; margin-bottom: 6px; }
+    .login-card .sub { font-size: 13px; color: var(--text-muted); margin-bottom: 22px; line-height: 1.5; }
+    .login-card label { display: block; font-size: 12px; font-weight: 600;
+                        margin-bottom: 5px; color: var(--text-muted); }
+    .login-card input { width: 100%; padding: 10px 12px; border: 1px solid var(--border);
+                        border-radius: 6px; font-size: 14px; margin-bottom: 15px; font-family: inherit; }
+    .login-card input:focus { outline: none; border-color: var(--primary); }
+    .login-card button[type=submit] { width: 100%; padding: 11px; border: none; border-radius: 6px;
+                                      background: var(--primary); color: #fff; font-size: 14px;
+                                      font-weight: 600; cursor: pointer; font-family: inherit; }
+    .login-card button[type=submit]:disabled { opacity: .5; cursor: wait; }
+    .login-erro { background: #fff5f5; border: 1px solid #ffc9c9; border-radius: 6px;
+                  padding: 11px 13px; font-size: 12.5px; color: var(--erro);
+                  margin-bottom: 16px; line-height: 1.5; }
     .login-erro[hidden] { display: none; }
-    @media (max-width: 768px) { body { padding: 12px; } .stats-row { grid-template-columns: repeat(2, 1fr); } .detail-panel { width: 100%; max-width: 100%; } }
+
+    .toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(20px);
+             background: var(--text); color: #fff; padding: 11px 20px; border-radius: 6px;
+             font-size: 13.5px; opacity: 0; pointer-events: none; transition: all .22s; z-index: 60; }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    @media (max-width: 860px) {
+      .app { flex-direction: column; }
+      .sidebar { width: 100%; height: auto; position: static; }
+      .nav { display: flex; overflow-x: auto; padding: 8px; gap: 4px; }
+      .nav-label { display: none; }
+      .nav-item { width: auto; white-space: nowrap; }
+      .sidebar-foot { display: flex; gap: 10px; align-items: center; }
+      .search { width: 100%; }
+      .panel { width: 100%; }
+    }
   </style>
 </head>
 <body>
+
   <div class="login-overlay" id="loginOverlay">
     <form class="login-card" id="loginForm">
-      <h2>🧪 LekoAI Test Dashboard</h2>
+      <h2>LekoAI — Central de Atendimento</h2>
       <p class="sub">Acesso restrito. Entre com o e-mail cadastrado por um admin.</p>
       <div class="login-erro" id="loginErro" hidden></div>
       <label for="loginEmail">E-mail</label>
@@ -108,51 +230,65 @@
     </form>
   </div>
 
-  <div class="header">
-    <h1>🧪 LekoAI Test Dashboard</h1>
-    <div class="header-right">
-      <span class="user-chip" id="userChip">
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">LekoAI Finance<span>Central de Atendimento</span></div>
+      <nav class="nav" id="nav">
+        <div class="nav-label">Filas</div>
+        <button class="nav-item active" data-vista="n1">
+          <span class="ico">🎧</span><span class="txt">Nível 1</span><span class="count" id="cntN1">0</span>
+        </button>
+        <button class="nav-item" data-vista="n2">
+          <span class="ico">⬆️</span><span class="txt">Nível 2 — meu</span><span class="count" id="cntN2">0</span>
+        </button>
+        <div class="nav-label">Outros</div>
+        <button class="nav-item" data-vista="resolvidos">
+          <span class="ico">✅</span><span class="txt">Resolvidos</span><span class="count" id="cntResolvidos">0</span>
+        </button>
+        <button class="nav-item" data-vista="monitoramento">
+          <span class="ico">📈</span><span class="txt">Monitoramento</span><span class="count" id="cntMon">0</span>
+        </button>
+      </nav>
+      <div class="sidebar-foot">
         <span class="email" id="userEmail">-</span>
-        <span class="role" id="userRole"></span>
-        <button class="link-btn" id="logoutBtn" type="button">sair</button>
-      </span>
-      <span class="last-update" id="lastUpdate">Carregando...</span>
+        <span id="userRole"></span> · <button class="link-btn" id="logoutBtn" type="button">sair</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div class="topbar-row">
+          <div>
+            <h1 id="vistaTitulo">Nível 1</h1>
+            <div class="sub" id="vistaSub">Chamados que acabaram de chegar</div>
+          </div>
+          <div class="spacer"></div>
+          <input class="search" id="busca" type="search" placeholder="Buscar por título, cliente ou #id...">
+          <button class="icon-btn" id="btnRefresh" type="button">↻ Atualizar</button>
+        </div>
+        <div class="tabs" id="tabs">
+          <button class="tab active" data-status="">Todos <span class="n" id="tabTodos"></span></button>
+          <button class="tab" data-status="aberto">Aberto <span class="n" id="tabAberto"></span></button>
+          <button class="tab" data-status="atendendo">Atendendo <span class="n" id="tabAtendendo"></span></button>
+          <button class="tab" data-status="resolvido">Resolvido <span class="n" id="tabResolvido"></span></button>
+        </div>
+      </div>
+
+      <div class="banner" id="banner"></div>
+      <div class="list" id="lista"></div>
+    </main>
+  </div>
+
+  <div class="overlay" id="overlay" onclick="fecharDetalhe()"></div>
+  <aside class="panel" id="panel">
+    <div class="panel-head">
+      <h2 id="panelTitulo">Chamado</h2>
+      <button class="panel-close" onclick="fecharDetalhe()" aria-label="Fechar">&times;</button>
     </div>
-  </div>
-  <div class="setup-banner" id="setupBanner"></div>
-  <div class="stats-row">
-    <div class="stat-card"><div class="label">Total Chamados</div><div class="value" id="statTotal">-</div></div>
-    <div class="stat-card"><div class="label">Erros Abertos</div><div class="value erro" id="statErros">-</div></div>
-    <div class="stat-card"><div class="label">Latencia Media</div><div class="value latencia" id="statLatencia">-</div></div>
-    <div class="stat-card"><div class="label">Ultimo Teste</div><div class="value ok" id="statUltimo">-</div></div>
-  </div>
-  <div class="filter-bar">
-    <div class="group"><span class="group-label">Tipo:</span>
-      <button class="filter-btn active" data-filter="type" data-value="">Todos</button>
-      <button class="filter-btn" data-filter="type" data-value="erro">Erro</button>
-      <button class="filter-btn" data-filter="type" data-value="latencia">Latencia</button>
-      <button class="filter-btn" data-filter="type" data-value="melhoria">Melhoria</button>
-      <button class="filter-btn" data-filter="type" data-value="status">Status</button>
-    </div>
-    <div class="group"><span class="group-label">Status:</span>
-      <button class="filter-btn active" data-filter="status" data-value="">Todos</button>
-      <button class="filter-btn" data-filter="status" data-value="aberto">Aberto</button>
-      <button class="filter-btn" data-filter="status" data-value="resolvido">Resolvido</button>
-      <button class="filter-btn" data-filter="status" data-value="ignorado">Ignorado</button>
-    </div>
-  </div>
-  <div class="table-container">
-    <table><thead><tr><th>Tipo</th><th>Titulo</th><th>Teste</th><th>Latencia</th><th>Status</th><th>Data</th><th>Acoes</th></tr></thead>
-      <tbody id="tableBody"></tbody>
-    </table>
-    <div class="empty-state" id="emptyState" style="display:none;"><div class="icon">✅</div><p>Nenhum chamado encontrado. Tudo limpo!</p></div>
-  </div>
-  <div class="detail-overlay" id="detailOverlay" onclick="closeDetail()"></div>
-  <div class="detail-panel" id="detailPanel">
-    <div class="detail-header"><h2 id="detailTitle">Chamado</h2><button class="detail-close" onclick="closeDetail()">&times;</button></div>
-    <div class="detail-body" id="detailBody"></div>
-    <div class="detail-actions" id="detailActions"></div>
-  </div>
+    <div class="panel-body" id="panelBody"></div>
+    <div class="panel-foot" id="panelFoot"></div>
+  </aside>
+
   <div class="toast" id="toast"></div>
 
   <script>
@@ -173,8 +309,45 @@
     const SUPABASE_ANON_KEY = 'sb_publishable_O6JBjYJ_jBWDHCE2k3Whlg_x7H6cTYW';
     // ==========================
 
-    let filters = { type: '', status: '' };
-    let chamadosCache = [];
+    // Cada vista e uma fila do helpdesk. `query` e o que vai para a API; o filtro
+    // de status (abas) e aplicado no cliente porque a API so sabe filtrar UM
+    // status por vez, e a aba "Todos" precisa de varios ao mesmo tempo. A tabela
+    // e pequena (registros operacionais), entao uma requisicao por vista basta.
+    const VISTAS = {
+      n1: {
+        titulo: 'Nível 1',
+        sub: 'Chamados que acabaram de chegar. O agente de IA tria esta fila.',
+        query: 'escopo=suporte&nivel=n1',
+        excluirResolvidos: true,
+        vazio: 'Fila do N1 limpa. Nada esperando triagem.',
+      },
+      n2: {
+        titulo: 'Nível 2 — meu nível',
+        sub: 'Escalados pelo N1. Precisam de você.',
+        query: 'escopo=suporte&nivel=n2',
+        excluirResolvidos: true,
+        vazio: 'Nada escalado para você. 🎉',
+      },
+      resolvidos: {
+        titulo: 'Resolvidos',
+        sub: 'Chamados já fechados, dos dois níveis.',
+        query: 'escopo=suporte&status=resolvido',
+        excluirResolvidos: false,
+        vazio: 'Nenhum chamado resolvido ainda.',
+      },
+      monitoramento: {
+        titulo: 'Monitoramento',
+        sub: 'Heartbeat diário do CI. É telemetria, não chamado — fica fora das filas.',
+        query: 'escopo=monitoramento',
+        excluirResolvidos: false,
+        vazio: 'Nenhum registro de monitoramento.',
+      },
+    };
+
+    let vista = 'n1';
+    let filtroStatus = '';
+    let busca = '';
+    let cache = [];
     let refreshTimer = null;
 
     // ---------- sessao ----------
@@ -233,9 +406,9 @@
 
     function sair(motivo) {
       setSessao(null);
-      chamadosCache = [];
+      cache = [];
       if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-      document.getElementById('tableBody').innerHTML = '';
+      document.getElementById('lista').innerHTML = '';
       mostrarLogin(motivo || '');
     }
 
@@ -257,19 +430,54 @@
 
     // ---------- helpers ----------
     // Escapa o que vem do banco antes de ir para innerHTML: titulo e descricao
-    // sao texto livre gravado pelo CI, nao devem poder injetar HTML na pagina.
+    // sao texto livre gravado pelo CI e pelos clientes, nao devem poder injetar
+    // HTML na pagina.
     function esc(s) {
       return String(s === null || s === undefined ? '' : s)
         .replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
-    function showToast(msg, ms) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._timer); t._timer = setTimeout(() => t.classList.remove('show'), ms || 3000); }
-    function fmtDate(iso) { if (!iso) return '-'; const d = new Date(iso); return d.toLocaleDateString('pt-BR') + ' ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }); }
-    function typeEmoji(type) { return { erro: '🔴', latencia: '🟡', melhoria: '🔵', status: '🟢' }[type] || '⚪'; }
+    function showToast(msg, ms) {
+      const t = document.getElementById('toast');
+      t.textContent = msg; t.classList.add('show');
+      clearTimeout(t._timer); t._timer = setTimeout(() => t.classList.remove('show'), ms || 3000);
+    }
+    function fmtDate(iso) {
+      if (!iso) return '-';
+      const d = new Date(iso);
+      return d.toLocaleDateString('pt-BR') + ' ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    }
+    // "há 3 h" comunica urgencia melhor que um carimbo de data completo -- e o
+    // que um helpdesk mostra na lista.
+    function haQuanto(iso) {
+      if (!iso) return '';
+      const min = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+      if (min < 1) return 'agora';
+      if (min < 60) return `há ${min} min`;
+      const h = Math.floor(min / 60);
+      if (h < 24) return `há ${h} h`;
+      const d = Math.floor(h / 24);
+      return d === 1 ? 'há 1 dia' : `há ${d} dias`;
+    }
     function showBanner(msg) {
-      const b = document.getElementById('setupBanner');
+      const b = document.getElementById('banner');
       if (!msg) { b.style.display = 'none'; return; }
       b.textContent = '⚠️ ' + msg;
       b.style.display = 'block';
+    }
+    // Nome de quem abriu. test_name vem como 'telegram:<id> (Nome)' nos chamados
+    // de cliente, e um nome de teste do CI nos demais.
+    function autor(c) {
+      const tn = c.test_name || '';
+      if (!tn.startsWith('telegram:')) return { nome: tn || 'Sistema', cliente: false };
+      const m = tn.match(/\(([^)]+)\)\s*$/);
+      return { nome: m ? m[1] : tn.slice(9).trim(), cliente: true };
+    }
+    // Cor estavel por nome, para o avatar nao mudar a cada carregamento.
+    function corAvatar(nome) {
+      const cores = ['#2a6f97', '#7048e8', '#2f9e44', '#e8590c', '#c2255c', '#1098ad'];
+      let h = 0;
+      for (let i = 0; i < nome.length; i++) h = (h * 31 + nome.charCodeAt(i)) >>> 0;
+      return cores[h % cores.length];
     }
 
     // ---------- acesso a API ----------
@@ -313,104 +521,236 @@
     function apiGet(qs) { return apiCall('GET', `${API}?${qs}`, null, false); }
     function apiWrite(payload) { return apiCall('POST', API, payload, false); }
 
-    async function loadStats() {
+    // ---------- carregamento ----------
+    async function carregarContadores() {
       try {
-        // Uma requisicao so: o endpoint ja devolve erros_abertos (cruzamento de
-        // type=erro com status=aberto), evitando uma segunda ida ao servidor.
         const s = await apiGet('action=stats');
-
-        document.getElementById('statTotal').textContent = s.total || 0;
-        document.getElementById('statErros').textContent = s.erros_abertos || 0;
-        document.getElementById('statLatencia').textContent = s.avg_latency_ms ? `${s.avg_latency_ms}ms` : '-';
-        document.getElementById('statUltimo').textContent = s.last_run ? fmtDate(s.last_run) : 'Nunca';
+        const f = s.filas || {};
+        const por = (id, n) => {
+          const el = document.getElementById(id);
+          el.textContent = n || 0;
+          el.classList.toggle('zero', !n);
+        };
+        por('cntN1', f.n1);
+        por('cntN2', f.n2);
+        por('cntMon', f.monitoramento);
+        por('cntResolvidos', f.resolvidos);
         showBanner('');
       } catch (e) {
         console.error('Stats error:', e);
-        showBanner('Nao foi possivel carregar as estatisticas: ' + e.message);
+        showBanner('Nao foi possivel carregar os contadores: ' + e.message);
       }
     }
 
-    async function loadChamados() {
+    async function carregarLista() {
+      const cfg = VISTAS[vista];
       try {
-        const params = new URLSearchParams({ limit: '100' });
-        if (filters.type) params.set('type', filters.type);
-        if (filters.status) params.set('status', filters.status);
-        const res = await apiGet(params.toString());
-        chamadosCache = res.data || [];
-
-        const tbody = document.getElementById('tableBody');
-        const empty = document.getElementById('emptyState');
-        if (chamadosCache.length === 0) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
-        empty.style.display = 'none';
-        tbody.innerHTML = chamadosCache.map(c => `
-          <tr class="chamado-row" onclick="openDetail(${Number(c.id)})">
-            <td><span class="badge badge-${esc(c.type)}">${esc(c.type)}</span></td>
-            <td>${esc(c.title)}</td>
-            <td>${esc(c.test_name || '-')}</td>
-            <td>${c.latency_ms ? Math.round(c.latency_ms) + 'ms' : '-'}</td>
-            <td><span class="badge status-${esc(c.status)}">${esc(c.status)}</span></td>
-            <td>${fmtDate(c.timestamp)}</td>
-            <td class="actions" onclick="event.stopPropagation()">
-              ${c.status === 'aberto' ? `<button class="action-btn btn-resolver" onclick="updateStatus(${Number(c.id)},'resolvido')">✓</button><button class="action-btn btn-ignorar" onclick="updateStatus(${Number(c.id)},'ignorado')">—</button>` : ''}
-              <button class="action-btn btn-deletar" onclick="deleteChamado(${Number(c.id)})">✕</button>
-            </td>
-          </tr>`).join('');
+        const res = await apiGet(`${cfg.query}&limit=100`);
+        cache = res.data || [];
+        // Nas filas de trabalho, o que ja foi resolvido sai de vista -- ele mora
+        // na aba "Resolvidos". Sem isso a fila do N1 cresceria para sempre.
+        if (cfg.excluirResolvidos) cache = cache.filter(c => c.status !== 'resolvido');
       } catch (e) {
         console.error('Load error:', e);
-        document.getElementById('tableBody').innerHTML = '';
-        document.getElementById('emptyState').style.display = 'block';
-        document.getElementById('emptyState').querySelector('p').textContent = 'Erro: ' + e.message;
+        cache = [];
+        document.getElementById('lista').innerHTML =
+          `<div class="empty"><span class="ico">⚠️</span>Erro ao carregar: ${esc(e.message)}</div>`;
+        return;
       }
+      render();
     }
 
-    function openDetail(id) {
-      const c = chamadosCache.find(x => x.id === id); if (!c) return;
-      document.getElementById('detailTitle').textContent = `${typeEmoji(c.type)} Chamado #${c.id}`;
-      let html = `
-        <div class="detail-meta">
-          <div class="detail-field"><div class="field-label">Tipo</div><div class="field-value"><span class="badge badge-${esc(c.type)}">${esc(c.type)}</span></div></div>
-          <div class="detail-field"><div class="field-label">Status</div><div class="field-value"><span class="badge status-${esc(c.status)}">${esc(c.status)}</span></div></div>
-          <div class="detail-field"><div class="field-label">Teste</div><div class="field-value">${esc(c.test_name || 'N/A')}</div></div>
-          <div class="detail-field"><div class="field-label">Latencia</div><div class="field-value">${c.latency_ms ? Math.round(c.latency_ms) + 'ms' : 'N/A'}</div></div>
-        </div>
-        <div class="detail-field"><div class="field-label">Titulo</div><div class="field-value" style="font-size:16px;font-weight:600;">${esc(c.title)}</div></div>
-        <div class="detail-field"><div class="field-label">Descricao / Detalhes</div><div class="field-value description-box">${esc(c.description || 'Sem descricao.')}</div></div>
-        <div class="detail-meta">
-          <div class="detail-field"><div class="field-label">Criado em</div><div class="field-value">${fmtDate(c.created_at)}</div></div>
-          <div class="detail-field"><div class="field-label">Timestamp</div><div class="field-value">${fmtDate(c.timestamp)}</div></div>
+    function visiveis() {
+      let l = cache;
+      if (filtroStatus) l = l.filter(c => c.status === filtroStatus);
+      if (busca) {
+        const q = busca.toLowerCase();
+        l = l.filter(c =>
+          String(c.id) === q.replace('#', '') ||
+          (c.title || '').toLowerCase().includes(q) ||
+          (c.test_name || '').toLowerCase().includes(q));
+      }
+      return l;
+    }
+
+    function render() {
+      const cfg = VISTAS[vista];
+      document.getElementById('vistaTitulo').textContent = cfg.titulo;
+      document.getElementById('vistaSub').textContent = cfg.sub;
+
+      // Numeros das abas: contam o cache da vista, nao o total do banco.
+      const cnt = s => cache.filter(c => c.status === s).length;
+      document.getElementById('tabTodos').textContent = cache.length ? `(${cache.length})` : '';
+      document.getElementById('tabAberto').textContent = cnt('aberto') ? `(${cnt('aberto')})` : '';
+      document.getElementById('tabAtendendo').textContent = cnt('atendendo') ? `(${cnt('atendendo')})` : '';
+      document.getElementById('tabResolvido').textContent = cnt('resolvido') ? `(${cnt('resolvido')})` : '';
+
+      const lista = visiveis();
+      const el = document.getElementById('lista');
+      if (!lista.length) {
+        const msg = busca || filtroStatus ? 'Nenhum chamado com esse filtro.' : cfg.vazio;
+        el.innerHTML = `<div class="empty"><span class="ico">📭</span>${esc(msg)}</div>`;
+        return;
+      }
+
+      el.innerHTML = lista.map(c => {
+        const a = autor(c);
+        const inicial = esc((a.nome || '?').trim().charAt(0).toUpperCase() || '?');
+        // No N2 o relogio que importa e o de quando o chamado chegou ALI, nao o
+        // de quando o cliente abriu.
+        const quando = (vista === 'n2' && c.escalado_em) ? c.escalado_em : c.timestamp;
+        const prefixo = (vista === 'n2' && c.escalado_em) ? 'escalado ' : '';
+        return `
+        <div class="ticket" onclick="abrirDetalhe(${Number(c.id)})">
+          <div class="avatar" style="background:${corAvatar(a.nome)}">${inicial}</div>
+          <div class="ticket-body">
+            <div class="ticket-title">${esc(c.title)}</div>
+            <div class="ticket-meta">
+              <span>#${Number(c.id)}</span>
+              <span>${esc(a.nome)}</span>
+              ${a.cliente ? '<span class="pill pill-cliente">cliente</span>' : ''}
+              <span>${esc(prefixo + haQuanto(quando))}</span>
+              ${c.latency_ms ? `<span>${Math.round(c.latency_ms)}ms</span>` : ''}
+            </div>
+          </div>
+          <div class="ticket-side">
+            <span class="pill pill-${esc(c.status)}">${esc(c.status)}</span>
+            <span class="pill pill-${esc(c.type)}">${esc(c.type)}</span>
+            ${c.nivel === 'n2' ? '<span class="pill pill-n2">N2</span>' : ''}
+          </div>
         </div>`;
-      if (c.resolution_note) html += `<div class="detail-field"><div class="field-label">Nota de resolucao</div><div class="field-value resolution-box">${esc(c.resolution_note)}</div></div>`;
-      document.getElementById('detailBody').innerHTML = html;
-      let act = c.status === 'aberto' ? `<button class="action-btn btn-resolver" onclick="updateStatus(${Number(c.id)},'resolvido');closeDetail();">✓ Resolver</button><button class="action-btn btn-ignorar" onclick="updateStatus(${Number(c.id)},'ignorado');closeDetail();">— Ignorar</button>` : '';
-      act += `<button class="action-btn btn-deletar" onclick="deleteChamado(${Number(c.id)});closeDetail();">✕ Deletar</button>`;
-      document.getElementById('detailActions').innerHTML = act;
-      document.getElementById('detailOverlay').classList.add('open');
-      document.getElementById('detailPanel').classList.add('open');
+      }).join('');
     }
-    function closeDetail() { document.getElementById('detailOverlay').classList.remove('open'); document.getElementById('detailPanel').classList.remove('open'); }
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDetail(); });
 
-    async function updateStatus(id, status) {
-      const note = prompt(`Nota (opcional) para "${status}":`);
-      if (note === null) return;  // cancelou o prompt: nao altera nada
+    // ---------- detalhe ----------
+    function abrirDetalhe(id) {
+      const c = cache.find(x => Number(x.id) === Number(id));
+      if (!c) return;
+      const a = autor(c);
+      document.getElementById('panelTitulo').textContent = `Chamado #${c.id}`;
+
+      let html = `
+        <div class="field">
+          <div class="field-label">Assunto</div>
+          <div class="field-value" style="font-size:16px;font-weight:600;">${esc(c.title)}</div>
+        </div>
+        <div class="grid">
+          <div><div class="field-label">Status</div><div class="field-value"><span class="pill pill-${esc(c.status)}">${esc(c.status)}</span></div></div>
+          <div><div class="field-label">Nível</div><div class="field-value">${c.nivel === 'n2' ? '<span class="pill pill-n2">N2</span>' : 'N1'}</div></div>
+          <div><div class="field-label">Tipo</div><div class="field-value"><span class="pill pill-${esc(c.type)}">${esc(c.type)}</span></div></div>
+          <div><div class="field-label">Latência</div><div class="field-value">${c.latency_ms ? Math.round(c.latency_ms) + 'ms' : '—'}</div></div>
+          <div><div class="field-label">Aberto por</div><div class="field-value">${esc(a.nome)}${a.cliente ? ' <span class="pill pill-cliente">cliente</span>' : ''}</div></div>
+          <div><div class="field-label">Aberto em</div><div class="field-value">${esc(fmtDate(c.timestamp))}</div></div>
+        </div>
+        <div class="field">
+          <div class="field-label">Descrição</div>
+          <div class="box">${esc(c.description || 'Sem descrição.')}</div>
+        </div>`;
+      if (c.escalado_em) {
+        html += `<div class="field"><div class="field-label">Escalado para o N2 em</div>
+                 <div class="field-value">${esc(fmtDate(c.escalado_em))} (${esc(haQuanto(c.escalado_em))})</div></div>`;
+      }
+      if (c.resolution_note) {
+        html += `<div class="field"><div class="field-label">Parecer / nota</div>
+                 <div class="box nota">${esc(c.resolution_note)}</div></div>`;
+      }
+      document.getElementById('panelBody').innerHTML = html;
+
+      // Acoes disponiveis dependem de ONDE o chamado esta no ciclo.
+      const id_ = Number(c.id);
+      let acoes = '';
+      if (c.status === 'aberto') {
+        acoes += `<button class="btn btn-primary acao" onclick="mudarStatus(${id_},'atendendo')">▶ Atender</button>`;
+      }
+      if (c.status !== 'resolvido') {
+        acoes += `<button class="btn btn-ok acao" onclick="mudarStatus(${id_},'resolvido')">✓ Resolver</button>`;
+      }
+      // Escalar so faz sentido para quem ainda esta no N1.
+      if (c.nivel !== 'n2' && c.type !== 'status') {
+        acoes += `<button class="btn acao" onclick="escalar(${id_})">⬆ Escalar p/ N2</button>`;
+      }
+      if (c.status === 'resolvido') {
+        acoes += `<button class="btn acao" onclick="mudarStatus(${id_},'aberto')">↩ Reabrir</button>`;
+      }
+      acoes += `<button class="btn btn-danger acao" onclick="deletar(${id_})">✕ Excluir</button>`;
+      document.getElementById('panelFoot').innerHTML = acoes;
+
+      document.getElementById('overlay').classList.add('open');
+      document.getElementById('panel').classList.add('open');
+    }
+    function fecharDetalhe() {
+      document.getElementById('overlay').classList.remove('open');
+      document.getElementById('panel').classList.remove('open');
+    }
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') fecharDetalhe(); });
+
+    // ---------- acoes ----------
+    async function mudarStatus(id, status) {
+      const payload = { _method: 'PATCH', id: id, status: status };
+      // So pede nota ao FECHAR: e o momento em que a nota tem valor (fica no
+      // historico). Pedir a cada clique de "atender" so atrapalharia.
+      if (status === 'resolvido') {
+        const nota = prompt('Nota de resolução (opcional):');
+        if (nota === null) return;          // cancelou: nao altera nada
+        if (nota) payload.resolution_note = nota;
+      }
       try {
-        await apiWrite({ _method: 'PATCH', id, status, resolution_note: note || '' });
-        showToast(`Chamado #${id} → ${status}`); refresh();
+        await apiWrite(payload);
+        showToast(`Chamado #${id} → ${status}`);
+        fecharDetalhe(); refresh();
       } catch (e) { showToast('Erro: ' + e.message, 9000); }
     }
 
-    async function deleteChamado(id) {
-      if (!confirm('Deletar este chamado?')) return;
+    async function escalar(id) {
+      const nota = prompt('Parecer para o N2 (o que você já apurou):');
+      if (nota === null) return;
       try {
-        await apiWrite({ _method: 'DELETE', id });
-        showToast(`Chamado #${id} removido`); refresh();
+        // Escalar muda o NIVEL e devolve para 'aberto': o chamado continua de
+        // pe, so trocou de dono. Mesma regra que o agente de IA usa.
+        await apiWrite({
+          _method: 'PATCH', id: id, nivel: 'n2', status: 'aberto',
+          resolution_note: nota ? `[Escalado p/ N2] ${nota}` : '[Escalado p/ N2]',
+        });
+        showToast(`Chamado #${id} escalado para o N2`);
+        fecharDetalhe(); refresh();
       } catch (e) { showToast('Erro: ' + e.message, 9000); }
     }
 
-    function refresh() { loadStats(); loadChamados(); document.getElementById('lastUpdate').textContent = `Atualizado: ${new Date().toLocaleTimeString('pt-BR')}`; }
-    document.querySelectorAll('.filter-btn').forEach(btn => {
-      btn.addEventListener('click', () => { filters[btn.dataset.filter] = btn.dataset.value; btn.closest('.group').querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active')); btn.classList.add('active'); loadChamados(); });
+    async function deletar(id) {
+      if (!confirm('Excluir este chamado? Não dá para desfazer.')) return;
+      try {
+        await apiWrite({ _method: 'DELETE', id: id });
+        showToast(`Chamado #${id} removido`);
+        fecharDetalhe(); refresh();
+      } catch (e) { showToast('Erro: ' + e.message, 9000); }
+    }
+
+    function refresh() { carregarContadores(); carregarLista(); }
+
+    // ---------- navegacao ----------
+    document.getElementById('nav').addEventListener('click', ev => {
+      const btn = ev.target.closest('.nav-item');
+      if (!btn) return;
+      vista = btn.dataset.vista;
+      filtroStatus = '';
+      document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.status === ''));
+      carregarLista();
     });
+
+    document.getElementById('tabs').addEventListener('click', ev => {
+      const t = ev.target.closest('.tab');
+      if (!t) return;
+      filtroStatus = t.dataset.status;
+      document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
+      render();
+    });
+
+    document.getElementById('busca').addEventListener('input', ev => {
+      busca = ev.target.value.trim();
+      render();
+    });
+    document.getElementById('btnRefresh').addEventListener('click', refresh);
 
     // ---------- login / logout ----------
     document.getElementById('loginForm').addEventListener('submit', async (ev) => {
@@ -444,7 +784,7 @@
       const ehAdmin = perfil && perfil.role === 'admin';
       document.getElementById('userEmail').textContent = (perfil && perfil.email) || '-';
       document.getElementById('userRole').textContent = (perfil && perfil.role) || '';
-      // .readonly esconde resolver/ignorar/deletar para quem e 'leitor'
+      // .readonly esconde os botoes de acao para quem e 'leitor'
       document.body.classList.toggle('readonly', !ehAdmin);
     }
 

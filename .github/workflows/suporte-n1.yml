@@ -1,0 +1,37 @@
+name: LekoAI Suporte N1
+
+on:
+  schedule:
+    # Roda todo dia as 11h BRT (14h UTC), 1h depois da bateria de testes (10h BRT),
+    # para triar inclusive os chamados que os testes acabaram de abrir.
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+    # Permite rodar manualmente pela aba Actions.
+
+jobs:
+  triagem-n1:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install groq
+
+      - name: Rodar triagem N1
+        env:
+          # Cérebro (mesmo provider/modelo do bot).
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          # I/O nos chamados via API pública (a service_role NUNCA vem para o CI).
+          DASHBOARD_API: https://leko-ai-finance-ruddy.vercel.app/api/chamados
+          DASHBOARD_TOKEN: ${{ secrets.DASHBOARD_TOKEN }}
+          # Notificação ao N2 (Alex) no Telegram.
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ADMIN_TELEGRAM_IDS: ${{ secrets.ADMIN_TELEGRAM_IDS }}
+        run: python -m tools.suporte_n1_triagem

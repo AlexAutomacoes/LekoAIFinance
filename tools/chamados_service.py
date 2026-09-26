@@ -24,7 +24,20 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "")
 
 VALID_TYPES = ["erro", "latencia", "melhoria", "status"]
-VALID_STATUS = ["aberto", "resolvido", "ignorado"]
+# Ciclo de vida do chamado (etapa 2): chega em 'aberto', o agente marca
+# 'atendendo' enquanto analisa e fecha em 'resolvido'. O antigo 'ignorado' foi
+# descontinuado em sql/etapa2_niveis_n1_n2.sql — escalar agora muda o NÍVEL,
+# não o status, porque um chamado escalado continua aberto (só que para o N2).
+VALID_STATUS = ["aberto", "atendendo", "resolvido"]
+
+# Níveis de atendimento. Todo chamado nasce no n1; o agente escala para o n2,
+# que é a fila do Alex.
+VALID_NIVEIS = ["n1", "n2"]
+
+# O heartbeat diário do CI (type='status', "Bateria: 6/6 OK") não é um chamado
+# de suporte: é telemetria. Fica fora das filas de N1/N2 e aparece no painel de
+# Monitoramento do dashboard. Sem esta separação, 80% da fila do N1 seria ruído.
+TIPOS_DE_SUPORTE = ["erro", "latencia", "melhoria"]
 
 
 def _client():
@@ -171,21 +184,34 @@ def list_chamados(headers, params: dict):
 
         type_filter = params.get("type")
         status_filter = params.get("status")
-        if type_filter:
-            query = query.eq("type", type_filter)
-        if status_filter:
-            query = query.eq("status", status_filter)
+        nivel_filter = params.get("nivel")
+        # `escopo=suporte` traz só erro/latencia/melhoria (as filas de N1 e N2);
+        # `escopo=monitoramento` traz só o heartbeat do CI. Existe como parâmetro
+        # próprio porque o filtro é por um CONJUNTO de tipos, e `type` sozinho só
+        # sabe filtrar um valor de cada vez.
+        escopo = params.get("escopo")
+
+        def _aplicar(q):
+            if type_filter:
+                q = q.eq("type", type_filter)
+            elif escopo == "suporte":
+                q = q.in_("type", TIPOS_DE_SUPORTE)
+            elif escopo == "monitoramento":
+                q = q.eq("type", "status")
+            if status_filter:
+                q = q.eq("status", status_filter)
+            if nivel_filter:
+                q = q.eq("nivel", nivel_filter)
+            return q
+
+        query = _aplicar(query)
 
         limit = int(params.get("limit", 50))
         offset = int(params.get("offset", 0))
         query = query.order("timestamp", desc=True).range(offset, offset + limit - 1)
         response = query.execute()
 
-        count_query = supabase.table("chamados").select("id", count="exact")
-        if type_filter:
-            count_query = count_query.eq("type", type_filter)
-        if status_filter:
-            count_query = count_query.eq("status", status_filter)
+        count_query = _aplicar(supabase.table("chamados").select("id", count="exact"))
         count_resp = count_query.execute()
 
         return 200, {
@@ -230,16 +256,32 @@ def stats(headers):
                          .eq("type", "erro").eq("status", "aberto")
                          .execute().count or 0)
 
-        linhas = supabase.table("chamados").select("type, status, latency_ms").execute().data or []
+        linhas = (supabase.table("chamados")
+                  .select("type, status, latency_ms, nivel").execute().data or [])
 
         by_type = {t: 0 for t in VALID_TYPES}
         by_status = {s: 0 for s in VALID_STATUS}
+        # Badges da sidebar. `n1`/`n2` contam o que ainda NÃO foi fechado em cada
+        # nível — é o número que diz "tem trabalho aí". `resolvidos` conta só os
+        # de suporte, para bater com a lista que a aba mostra: se contasse o
+        # heartbeat junto, o badge diria 9 e a tela mostraria 3.
+        filas = {"n1": 0, "n2": 0, "monitoramento": 0, "resolvidos": 0}
         latencies = []
         for r in linhas:
-            if r.get("type") in by_type:
-                by_type[r["type"]] += 1
-            if r.get("status") in by_status:
-                by_status[r["status"]] += 1
+            tipo, st = r.get("type"), r.get("status")
+            if tipo in by_type:
+                by_type[tipo] += 1
+            if st in by_status:
+                by_status[st] += 1
+            if tipo == "status":
+                filas["monitoramento"] += 1
+            elif tipo in TIPOS_DE_SUPORTE:
+                if st == "resolvido":
+                    filas["resolvidos"] += 1
+                else:
+                    nivel = r.get("nivel") or "n1"
+                    if nivel in ("n1", "n2"):
+                        filas[nivel] += 1
             if r.get("latency_ms"):
                 latencies.append(r["latency_ms"])
 
@@ -257,6 +299,7 @@ def stats(headers):
             "erros_abertos": erros_abertos,
             "by_type": by_type,
             "by_status": by_status,
+            "filas": filas,
             "avg_latency_ms": avg_latency,
             "last_run": last_run,
         }
@@ -285,6 +328,9 @@ def create(headers, body: dict):
         "test_name": body.get("test_name"),
         "latency_ms": body.get("latency_ms"),
         "status": body.get("status", "aberto"),
+        # Todo chamado nasce no N1, sem exceção — inclusive os do CI. Quem sobe
+        # para o N2 é só o agente, via patch, depois de triar.
+        "nivel": "n1",
         "timestamp": body["timestamp"],
     }
     try:
@@ -314,6 +360,15 @@ def patch(headers, body: dict):
         updates["status"] = body["status"]
     if "resolution_note" in body:
         updates["resolution_note"] = body["resolution_note"]
+    if "nivel" in body:
+        if body["nivel"] not in VALID_NIVEIS:
+            return 400, {"error": f"nivel deve ser: {VALID_NIVEIS}"}
+        updates["nivel"] = body["nivel"]
+        # Carimba a chegada no N2 aqui, no servidor, em vez de confiar num
+        # horário mandado pelo cliente — é o mesmo motivo de `timestamp` do
+        # webhook: quem escreve a hora é quem está mais perto do banco.
+        if body["nivel"] == "n2":
+            updates["escalado_em"] = datetime.now(timezone.utc).isoformat()
     if not updates:
         return 400, {"error": "Nenhum campo para atualizar"}
 
@@ -377,6 +432,7 @@ def criar_pelo_bot(telegram_id: int, nome: str, problema: str, esperado: str):
                         f"Comportamento esperado:\n{esperado}"),
         "test_name": f"telegram:{telegram_id}" + (f" ({nome})" if nome else ""),
         "status": "aberto",
+        "nivel": "n1",   # o cliente sempre entra pelo N1
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     try:
