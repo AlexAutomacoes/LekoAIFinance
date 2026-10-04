@@ -32,7 +32,7 @@ from tools.subscription import (
     MOTIVO_SO_PAGO,
     ACAO_CHAMADO,
 )
-from tools.payment_service import criar_cobranca_pix, criar_assinatura_cartao, cartao_disponivel
+from tools.payment_service import criar_checkout
 from tools.quiz_link import vincular_telegram
 
 # Acima deste nº de dias, o relatório vira arquivo (PDF/Excel) em vez de texto no chat ("mais de 1 semana").
@@ -211,62 +211,33 @@ NOMES_PLANOS = {"plus_monthly": "LekoAI Plus (mensal) — R$ 14,90",
 
 def gerar_escolha_pagamento(plan_type: str, telegram_id: int) -> list:
     """
-    Resposta ao clique num plano: pergunta COMO pagar quando o cartão está
-    disponível para aquele plano; senão vai direto ao PIX (como sempre foi).
-    O vitalício é compra única — não tem assinatura, então segue só PIX.
+    Resposta ao clique num plano: cria o Checkout da Stripe e devolve o botão que
+    abre a página de pagamento. É a página da Stripe que oferece PIX ou cartão e
+    coleta CPF/e-mail — o bot não precisa perguntar nem guardar esses dados.
     """
-    if not cartao_disponivel(plan_type):
-        return gerar_cobranca_resposta(plan_type, telegram_id)
-
-    return [{
-        "tipo": "botoes_pagamento",
-        "plano": plan_type,
-        "mensagem": (f"{NOMES_PLANOS.get(plan_type, plan_type)}\n\n"
-                     "Como você prefere pagar?\n"
-                     "📱 PIX — você paga de novo a cada período.\n"
-                     "💳 Cartão — renova sozinho, cancele quando quiser."),
-    }]
-
-
-def gerar_cobranca_resposta(plan_type: str, telegram_id: int) -> list:
-    """Cria a cobrança PIX e devolve as respostas a enviar (QR + copia-e-cola)."""
     try:
-        cob = criar_cobranca_pix(plan_type, telegram_id)
+        checkout = criar_checkout(plan_type, telegram_id)
     except Exception as e:
-        logging.error("falha ao criar cobranca PIX: %s", e, exc_info=True)
-        return ["Não consegui gerar a cobrança agora. Tente de novo em instantes."]
+        logging.error("falha ao criar checkout na Stripe: %s", e, exc_info=True)
+        return ["Não consegui gerar o pagamento agora. Tente de novo em instantes. 🙏"]
 
-    legenda = (f"💳 {NOMES_PLANOS.get(plan_type, plan_type)}\n"
-               "Escaneie o QR ou use o código copia-e-cola abaixo. Assim que o pagamento "
-               "cair, seu plano é ativado automaticamente. ✅")
-    return [
-        {"tipo": "foto_pix", "base64": cob["brCodeBase64"], "legenda": legenda},
-        f"📋 PIX copia-e-cola:\n{cob['brCode']}",
-    ]
-
-
-def gerar_checkout_cartao_resposta(plan_type: str, telegram_id: int) -> list:
-    """Cria a assinatura no cartão e devolve o botão com o link do checkout."""
-    try:
-        assinatura = criar_assinatura_cartao(plan_type, telegram_id)
-    except Exception as e:
-        logging.error("falha ao criar assinatura no cartao: %s", e, exc_info=True)
-        return ["Não consegui abrir o pagamento no cartão agora. Tente de novo em "
-                "instantes — ou pague por PIX em /assinar. 🙏"]
-
-    url = assinatura.get("url")
+    url = checkout.get("url")
     if not url:
-        logging.error("assinatura criada sem url de checkout: %s", assinatura)
-        return ["Não consegui abrir o pagamento no cartão agora. Pague por PIX em /assinar. 🙏"]
+        logging.error("checkout criado sem url: %s", checkout)
+        return ["Não consegui gerar o pagamento agora. Tente de novo em instantes. 🙏"]
 
-    periodo = "todo mês" if plan_type == "plus_monthly" else "todo ano"
+    if plan_type == "plus_monthly":
+        como = ("Pagamento no cartão: a assinatura renova sozinha todo mês e você "
+                "cancela quando quiser.")
+    else:
+        como = "Pague com PIX ou cartão, numa compra única."
     return [{
         "tipo": "botao_link",
         "mensagem": (f"💳 {NOMES_PLANOS.get(plan_type, plan_type)}\n"
-                     f"Toque no botão para pagar com cartão. A assinatura renova {periodo} "
-                     "e você cancela quando quiser. Assim que o pagamento for aprovado, seu "
+                     f"{como}\n\nToque no botão para abrir a página segura da Stripe. "
+                     "O link vale por 1 hora. Assim que o pagamento for aprovado, seu "
                      "plano é ativado automaticamente. ✅"),
-        "texto_botao": "💳 Pagar com cartão",
+        "texto_botao": "💳 Pagar",
         "url": url,
     }]
 

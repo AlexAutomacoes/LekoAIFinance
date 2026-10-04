@@ -57,20 +57,6 @@ def send_document(chat_id: int, file_path: str, caption: str = "") -> None:
         logging.error(f"Falha ao enviar documento ao Telegram: {e}", exc_info=True)
 
 
-def send_photo(chat_id: int, base64_str: str, caption: str = "") -> None:
-    """Envia uma imagem (o QR do PIX) a partir de um base64 (com ou sem prefixo 'data:')."""
-    try:
-        import base64 as _b64
-        dados = base64_str.split(",", 1)[1] if base64_str.startswith("data:") else base64_str
-        img = _b64.b64decode(dados)
-        files = {"photo": ("qrcode.png", img, "image/png")}
-        data = {"chat_id": str(chat_id)}
-        if caption:
-            data["caption"] = caption
-        httpx.post(f"{API_BASE}/sendPhoto", data=data, files=files, timeout=30)
-    except Exception as e:
-        logging.error(f"Falha ao enviar foto ao Telegram: {e}", exc_info=True)
-
 def send_message_with_buttons(chat_id: int, text: str, data_inicio: str, data_fim: str) -> None:
     """Envia uma mensagem com botões Inline via Telegram Bot API."""
     keyboard = {
@@ -98,7 +84,7 @@ def send_message_with_buttons(chat_id: int, text: str, data_inicio: str, data_fi
 
 
 def send_plan_buttons(chat_id: int, text: str) -> None:
-    """Envia os botões dos planos pagos (PIX)."""
+    """Envia os botões dos planos pagos."""
     keyboard = {
         "inline_keyboard": [
             [{"text": "Plus mensal — R$ 14,90", "callback_data": "buy|plus_monthly"}],
@@ -114,27 +100,8 @@ def send_plan_buttons(chat_id: int, text: str) -> None:
     except Exception as e:
         logging.error(f"Falha ao enviar botões de planos: {e}")
 
-def send_payment_method_buttons(chat_id: int, text: str, plan_type: str) -> None:
-    """Botões da forma de pagamento (PIX x cartão) de um plano."""
-    keyboard = {
-        "inline_keyboard": [
-            [
-                {"text": "📱 PIX", "callback_data": f"pay_pix|{plan_type}"},
-                {"text": "💳 Cartão", "callback_data": f"pay_card|{plan_type}"},
-            ]
-        ]
-    }
-    payload = json.dumps({"chat_id": chat_id, "text": text, "reply_markup": keyboard}).encode("utf-8")
-    req = urllib.request.Request(f"{API_BASE}/sendMessage", data=payload,
-                                 headers={"Content-Type": "application/json"})
-    try:
-        urllib.request.urlopen(req, timeout=15)
-    except Exception as e:
-        logging.error(f"Falha ao enviar botões de pagamento: {e}")
-
-
 def send_link_button(chat_id: int, text: str, label: str, url: str) -> None:
-    """Envia um botão que ABRE UMA URL (checkout do cartão) — não gera callback."""
+    """Envia um botão que ABRE UMA URL (checkout da Stripe) — não gera callback."""
     keyboard = {"inline_keyboard": [[{"text": label, "url": url}]]}
     payload = json.dumps({"chat_id": chat_id, "text": text, "reply_markup": keyboard}).encode("utf-8")
     req = urllib.request.Request(f"{API_BASE}/sendMessage", data=payload,
@@ -164,13 +131,9 @@ def enviar_respostas(chat_id: int, respostas) -> None:
                                       resposta["data_inicio"], resposta["data_fim"])
         elif tipo == "botoes_planos":
             send_plan_buttons(chat_id, resposta["mensagem"])
-        elif tipo == "botoes_pagamento":
-            send_payment_method_buttons(chat_id, resposta["mensagem"], resposta["plano"])
         elif tipo == "botao_link":
             send_link_button(chat_id, resposta["mensagem"],
                              resposta["texto_botao"], resposta["url"])
-        elif tipo == "foto_pix":
-            send_photo(chat_id, resposta["base64"], resposta.get("legenda", ""))
         else:
             logging.warning(f"Tipo de resposta desconhecido: {tipo}")
 
@@ -324,23 +287,13 @@ class handler(BaseHTTPRequestHandler):
                     )
                     enviar_respostas(chat_id, respostas)
 
-                # Clique no plano: pergunta a forma de pagamento (ou já manda o PIX)
-                if data.startswith("buy|") and chat_id:
+                # Clique no plano: manda o botão do checkout da Stripe.
+                # pay_pix|/pay_card| são os botões da era AbacatePay — continuam
+                # respondendo para quem clicar numa mensagem antiga do chat.
+                if data.startswith(("buy|", "pay_pix|", "pay_card|")) and chat_id:
                     plano = data.split("|", 1)[1]
                     from tools.message_handler import gerar_escolha_pagamento
                     enviar_respostas(chat_id, gerar_escolha_pagamento(plano, user.get("id", chat_id)))
-
-                # Escolheu PIX
-                if data.startswith("pay_pix|") and chat_id:
-                    plano = data.split("|", 1)[1]
-                    from tools.message_handler import gerar_cobranca_resposta
-                    enviar_respostas(chat_id, gerar_cobranca_resposta(plano, user.get("id", chat_id)))
-
-                # Escolheu cartão (assinatura que renova sozinha)
-                if data.startswith("pay_card|") and chat_id:
-                    plano = data.split("|", 1)[1]
-                    from tools.message_handler import gerar_checkout_cartao_resposta
-                    enviar_respostas(chat_id, gerar_checkout_cartao_resposta(plano, user.get("id", chat_id)))
 
                 self._reply(200, "ok")
                 return

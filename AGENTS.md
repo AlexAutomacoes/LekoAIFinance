@@ -67,9 +67,7 @@ de polling. Não a torne `async` e não importe `telegram` dentro dela.
 | `documento` | envia arquivo (`caminho`, `legenda`) |
 | `botoes_formato` | botões PDF / Excel para relatório |
 | `botoes_planos` | botões dos 3 planos pagos |
-| `botoes_pagamento` | botões PIX / Cartão de um plano |
-| `botao_link` | botão que abre URL (checkout do cartão) |
-| `foto_pix` | manda o QR code do PIX (`base64`) |
+| `botao_link` | botão que abre URL (checkout da Stripe) |
 
 Quem traduz esses dicts em chamadas da API do Telegram é `enviar_respostas()`
 em `api/telegram.py`. **Adicionou um `tipo` novo? Tem que tratar lá também**,
@@ -88,7 +86,7 @@ O runtime Python da Vercel aceita **um único entrypoint**. Por isso
 | `GET /api/telegram` | healthcheck (`"LekoAIFinance webhook ativo."`) |
 | `POST /api/telegram` | webhook do Telegram (exige `X-Telegram-Bot-Api-Secret-Token`) |
 | `/api/chamados*` | `tools/chamados_service.py` |
-| `/api/pagamento*` | `tools/payment_service.py` (webhook do AbacatePay) |
+| `/api/pagamento*` | `tools/payment_service.py` (webhook da Stripe) |
 
 **Não crie novos arquivos em `api/`.** Se precisar de uma rota nova, adicione o
 despacho dentro de `api/telegram.py` e ponha a regra de negócio num módulo de
@@ -121,7 +119,8 @@ despacho dentro de `api/telegram.py` e ponha a regra de negócio num módulo de
 **negativo = saída, positivo = entrada**), `categoria`, `descricao`, `data` (`YYYY-MM-DD`).
 
 ### `pagamentos`
-`order_id` (único, garante idempotência do webhook), `external_id` (= `telegram_id`),
+`order_id` (único, garante idempotência do webhook — `pi_...` na compra única, `in_...`
+por fatura de assinatura), `external_id` (= `telegram_id`),
 `plan_type`, `status` (`pago` \| `estornado`), `event_raw` (jsonb, auditoria).
 Separada de `users` porque **o webhook pode chegar antes de o comprador existir**.
 
@@ -169,11 +168,20 @@ o e-mail precisa estar aqui. Falha fechada.
 | :--- | :--- | :--- |
 | Grátis | R$ 0 | — |
 | LekoAI Plus mensal | R$ 14,90/mês | **Cartão** (assinatura que renova sozinha) |
-| LekoAI Plus anual | R$ 119,00/ano | **PIX** avulso |
-| Vitalício | R$ 200,00 | **PIX** avulso |
+| LekoAI Plus anual | R$ 119,00/ano | **PIX ou cartão**, compra única |
+| Vitalício | R$ 200,00 | **PIX ou cartão**, compra única |
 
-**Por que mensal é cartão:** o PIX não faz débito automático, e a `subscription`
-do AbacatePay só aceita `CARD`. Não é escolha de gosto, é limite do gateway.
+Gateway: **Stripe**, via **Checkout hospedado**. O bot cria a sessão
+(`payment_service.criar_checkout`) e manda um `botao_link`; a página da Stripe
+oferece PIX/cartão e coleta CPF/e-mail. Não gere PIX pela API direta: ela exige
+CPF do pagador, e aí o bot teria que pedir e guardar dado pessoal.
+
+**Por que mensal é só cartão:** o Pix Automático (PIX recorrente) não existe para
+contas Stripe do Brasil. Não é escolha de gosto, é limite do gateway.
+
+O `telegram_id` vai em `client_reference_id` e em `metadata.externalId` (+
+`metadata.plan_type`); na assinatura também em `subscription_data.metadata`, que é
+o que aparece nas faturas de renovação e no cancelamento.
 
 **Limites do plano grátis** (`tools/subscription.py`):
 - 20 lançamentos por mês (`LIMITE_LANCAMENTOS_FREE`)
@@ -191,14 +199,23 @@ registra no log o que *teria* bloqueado, sem bloquear ninguém.
 `ADMIN_TELEGRAM_IDS` nunca é bloqueado, nem em produção.
 
 ### Webhook de pagamento — falha fechada
-`tools/payment_service.py` valida assinatura Standard Webhooks (HMAC-SHA256 sobre
-`id.timestamp.corpoBRUTO`), com janela anti-replay de 5 min. **Sem
-`ABACATEPAY_WEBHOOK_SECRET` ele rejeita tudo.** Isso é intencional: um webhook
+`tools/payment_service.py` valida o header `Stripe-Signature` (HMAC-SHA256 sobre
+`timestamp.corpoBRUTO`), com janela anti-replay de 5 min. **Sem
+`STRIPE_WEBHOOK_SECRET` ele rejeita tudo.** Isso é intencional: um webhook
 que falha aberto deixa qualquer pessoa forjar "compra aprovada" e ganhar plano
 vitalício. Nunca troque isso por um fallback permissivo.
 
-Ele responde **200 primeiro** e só depois avisa o usuário no Telegram — o
-AbacatePay reenvia o evento se não receber 2xx rápido.
+| Evento | Efeito |
+| :--- | :--- |
+| `checkout.session.completed` | ativa compra única paga no cartão (PIX chega `unpaid` e espera) |
+| `checkout.session.async_payment_succeeded` | ativa compra única paga no PIX |
+| `invoice.paid` | ativa/renova a assinatura; vencimento = fim do período cobrado + 2 dias |
+| `invoice.payment_failed` | só avisa — não revoga |
+| `customer.subscription.deleted` | revoga (só se o plano atual for o da assinatura) |
+| `charge.refunded` / `charge.dispute.created` | revoga a compra única (mesma trava) |
+
+Ele responde **200 primeiro** e só depois avisa o usuário no Telegram — a
+Stripe reenvia o evento se não receber 2xx rápido.
 
 ---
 
@@ -275,7 +292,7 @@ tools/
   llm_router.py            Camada 2 — única chamada de IA (Groq)
   db_manager.py            Camada 3 — Supabase (users, gastos)
   subscription.py          regras de plano — módulo PURO, sem I/O
-  payment_service.py       AbacatePay: webhook + criar cobrança PIX/assinatura
+  payment_service.py       Stripe: webhook + criar checkout (PIX/cartão/assinatura)
   chamados_service.py      /api/chamados — dashboard de chamados
   suporte_n1.py            braço determinístico do agente do Kiro (CLI, saída JSON)
   suporte_n1_triagem.py    N1 de PRODUÇÃO (Groq + API pública), roda no GitHub Actions
