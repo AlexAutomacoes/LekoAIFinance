@@ -83,15 +83,23 @@ def send_message_with_buttons(chat_id: int, text: str, data_inicio: str, data_fi
         logging.error(f"Falha ao enviar botões ao Telegram: {e}")
 
 
-def send_plan_buttons(chat_id: int, text: str) -> None:
-    """Envia os botões dos planos pagos."""
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": "Plus mensal — R$ 14,90", "callback_data": "buy|plus_monthly"}],
-            [{"text": "Plus anual — R$ 119", "callback_data": "buy|plus_annual"}],
-            [{"text": "Vitalício — R$ 200", "callback_data": "buy|lifetime"}],
-        ]
-    }
+# 4º botão do menu de planos (ver message_handler._menu_planos)
+BOTAO_GRATIS = {
+    "escolher": {"text": "🆓 Grátis — R$ 0", "callback_data": "free|escolher"},
+    "aguardar": {"text": "⏳ Aguardar o próximo mês", "callback_data": "free|aguardar"},
+}
+
+
+def send_plan_buttons(chat_id: int, text: str, gratis: str = None) -> None:
+    """Envia os botões dos planos pagos (+ o do Grátis/"aguardar", quando pedido)."""
+    linhas = [
+        [{"text": "Plus mensal — R$ 14,90", "callback_data": "buy|plus_monthly"}],
+        [{"text": "Plus anual — R$ 119", "callback_data": "buy|plus_annual"}],
+        [{"text": "Vitalício — R$ 200", "callback_data": "buy|lifetime"}],
+    ]
+    if gratis in BOTAO_GRATIS:
+        linhas.append([BOTAO_GRATIS[gratis]])
+    keyboard = {"inline_keyboard": linhas}
     payload = json.dumps({"chat_id": chat_id, "text": text, "reply_markup": keyboard}).encode("utf-8")
     req = urllib.request.Request(f"{API_BASE}/sendMessage", data=payload,
                                  headers={"Content-Type": "application/json"})
@@ -130,7 +138,7 @@ def enviar_respostas(chat_id: int, respostas) -> None:
             send_message_with_buttons(chat_id, resposta["mensagem"],
                                       resposta["data_inicio"], resposta["data_fim"])
         elif tipo == "botoes_planos":
-            send_plan_buttons(chat_id, resposta["mensagem"])
+            send_plan_buttons(chat_id, resposta["mensagem"], resposta.get("gratis"))
         elif tipo == "botao_link":
             send_link_button(chat_id, resposta["mensagem"],
                              resposta["texto_botao"], resposta["url"])
@@ -294,6 +302,15 @@ class handler(BaseHTTPRequestHandler):
                     plano = data.split("|", 1)[1]
                     from tools.message_handler import gerar_escolha_pagamento
                     enviar_respostas(chat_id, gerar_escolha_pagamento(plano, user.get("id", chat_id)))
+
+                # Escolheu o Grátis no menu de entrada / "aguardar o próximo mês"
+                if data == "free|escolher" and chat_id:
+                    from tools.message_handler import escolher_plano_gratis
+                    enviar_respostas(chat_id, escolher_plano_gratis(user.get("id", chat_id),
+                                                                    user.get("first_name", "")))
+                if data == "free|aguardar" and chat_id:
+                    from tools.message_handler import aguardar_proximo_mes
+                    enviar_respostas(chat_id, aguardar_proximo_mes())
 
                 self._reply(200, "ok")
                 return

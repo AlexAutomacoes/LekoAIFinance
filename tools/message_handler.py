@@ -18,6 +18,7 @@ from tools.db_manager import (
     aplicar_plano,
     get_user_row_by_id,
     salvar_rascunho_chamado,
+    marcar_plano_escolhido,
 )
 from tools.llm_router import extract_transaction, generate_financial_tips
 from tools.pdf_report import gerar_pdf_relatorio
@@ -59,7 +60,7 @@ def gerar_relatorio_por_formato(user_id: int, first_name: str, data_inicio: str,
         bloqueio = _gate(row, "relatorio", "relatorio-botao",
                          periodo_dias=_dias_no_periodo(data_inicio, data_fim))
         if bloqueio:
-            return [bloqueio]
+            return bloqueio
 
     transacoes = get_transactions(user_id=user_id, data_inicio=data_inicio, data_fim=data_fim)
     if not transacoes:
@@ -272,28 +273,85 @@ def _handle_dev(text: str, telegram_id: int, first_name: str) -> list:
 
     return ["Uso:\n/dev plano <free|plus|plus_vencido|lifetime>\n/dev status"]
 
-def _msg_bloqueio(verdict) -> str:
-    """Mensagem do paywall por motivo. Aponta pro /assinar (o botão de pagar vem no 3b-ii parte 2)."""
-    hint = "\n\n👉 Digite /assinar para ver os planos."
+def _menu_planos(mensagem: str, gratis: str = None) -> dict:
+    """
+    Control dict do menu de planos. `gratis` escolhe o 4º botão:
+      - "escolher": botão do plano Grátis (menu de entrada, antes da 1ª escolha);
+      - "aguardar": "esperar o próximo mês" (quando a cota do mês estourou);
+      - None: só os planos pagos (/assinaturas e demais bloqueios).
+    """
+    return {"tipo": "botoes_planos", "mensagem": mensagem, "gratis": gratis}
+
+
+def _precisa_escolher_plano(user_row) -> bool:
+    """
+    Usuário no Grátis que ainda não passou pelo menu de planos. Enquanto for
+    assim, toda mensagem devolve o menu. Quem paga já escolheu, por definição.
+    """
+    return (user_row.get("plan_type") or "free") == "free" and not user_row.get("plano_escolhido_em")
+
+
+def _primeiro_dia_proximo_mes() -> str:
+    """Data em que a cota mensal do Grátis volta, no horário de Brasília. Ex.: '01/11'."""
+    hoje = datetime.now(FUSO_SP).date()
+    proximo = date(hoje.year + (hoje.month == 12), hoje.month % 12 + 1, 1)
+    return proximo.strftime("%d/%m")
+
+
+MSG_ESCOLHA_PLANO = ("👇 Para começar, escolha um plano — o Grátis também é uma opção:")
+
+
+def escolher_plano_gratis(telegram_id: int, first_name: str) -> list:
+    """Clique no botão do Grátis: libera o uso e explica os limites."""
+    row = get_or_create_user_row(telegram_id, first_name)
+    if not row.get("plano_escolhido_em"):
+        marcar_plano_escolhido(row["id"])
+    return [
+        "🆓 Pronto, você está no plano Grátis!\n\n"
+        "O que vale nele:\n"
+        f"• {LIMITE_LANCAMENTOS_FREE} lançamentos por mês (renovam todo dia 1º)\n"
+        f"• Relatórios de até {LIMITE_DIAS_RELATORIO_FREE} dias\n"
+        "• Abrir chamado com a equipe é só nos planos pagos\n\n"
+        "Quando quiser lançamentos e relatórios ilimitados, é só digitar "
+        "/assinaturas e fazer o upgrade. 🚀\n\n"
+        "Já pode começar: me mande algo como \"gastei 50 no mercado\". 😉"
+    ]
+
+
+def aguardar_proximo_mes() -> list:
+    """Clique em "aguardar o próximo mês" depois de estourar a cota."""
+    return [f"👍 Tudo bem! Seus lançamentos do plano Grátis voltam no dia {_primeiro_dia_proximo_mes()}.\n"
+            "Se mudar de ideia antes disso, é só digitar /assinaturas."]
+
+
+def _msg_bloqueio(verdict) -> list:
+    """Mensagem do paywall por motivo, já com o menu de planos para o upgrade."""
     if verdict.motivo == MOTIVO_EXPIRADO:
-        return ("⛔ Seu plano venceu.\n"
-                "Renove o LekoAI Plus para voltar a ter acesso ilimitado." + hint)
+        return [_menu_planos("⛔ Seu plano venceu.\n"
+                             "Renove para voltar a ter acesso ilimitado:")]
     if verdict.motivo == MOTIVO_COTA:
         limite = verdict.meta.get("limite", LIMITE_LANCAMENTOS_FREE)
-        return (f"⛔ Você atingiu o limite de {limite} lançamentos/mês do plano Grátis." + hint)
+        # Só a cota é mensal — por isso só aqui faz sentido oferecer "esperar o mês virar".
+        return [_menu_planos(
+            f"⛔ Você usou os {limite} lançamentos deste mês do plano Grátis.\n\n"
+            "🚀 Faça o upgrade para ter lançamentos ilimitados — ou, se ainda não quer "
+            f"um plano, aguarde o próximo mês ({_primeiro_dia_proximo_mes()}) para os "
+            "limites serem liberados novamente:",
+            gratis="aguardar")]
     if verdict.motivo == MOTIVO_PERIODO:
         limite = verdict.meta.get("limite", LIMITE_DIAS_RELATORIO_FREE)
-        return (f"⛔ No plano Grátis os relatórios cobrem até {limite} dias." + hint)
+        return [_menu_planos(f"⛔ No plano Grátis os relatórios cobrem até {limite} dias.\n\n"
+                             "🚀 Faça o upgrade para relatórios de qualquer período:")]
     if verdict.motivo == MOTIVO_SO_PAGO:
-        return ("⛔ Abrir chamado é um benefício dos planos pagos.\n"
-                "Assinando, você fala direto com a equipe quando algo dá errado." + hint)
-    return "⛔ Este recurso é exclusivo dos planos pagos." + hint
+        return [_menu_planos("⛔ Abrir chamado é um benefício dos planos pagos.\n\n"
+                             "🚀 Faça o upgrade para falar direto com a equipe:")]
+    return [_menu_planos("⛔ Este recurso é exclusivo dos planos pagos. Faça o upgrade:")]
 
 def _gate(user_row, acao, contexto, *, lancamentos_mes=0, periodo_dias=0):
     """
-    Aplica o check_access. Devolve None se pode seguir; ou uma STRING de bloqueio
-    se deve parar. Com PAYWALL_ENABLED desligado (sombra), NUNCA bloqueia: apenas
-    registra no log o que teria bloqueado e devolve None.
+    Aplica o check_access. Devolve None se pode seguir; ou a LISTA de respostas
+    do bloqueio se deve parar. Com PAYWALL_ENABLED desligado (sombra), NUNCA
+    bloqueia: apenas registra no log o que teria bloqueado e devolve None.
     """
     verdict = check_access(user_row, acao, lancamentos_mes=lancamentos_mes, periodo_dias=periodo_dias)
     if verdict.liberado:
@@ -358,6 +416,15 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
         texto = (text or "").strip()
         comando = texto.lower()
 
+        # --- Menu de entrada: escolher um plano antes de usar ------------------
+        # Quem chega (pelo quiz ou pelo link direto) precisa escolher um plano —
+        # inclusive o Grátis — antes de usar o bot. Até escolher, qualquer
+        # mensagem devolve o mesmo menu. Fica fora do PAYWALL_ENABLED de propósito:
+        # não bloqueia ninguém, já que o Grátis é uma das opções.
+        if _precisa_escolher_plano(user_row) and not comando.startswith(
+                ("/start", "/assinaturas", "/assinar", "/dev")):
+            return [_menu_planos(MSG_ESCOLHA_PLANO, gratis="escolher")]
+
         # --- /chamado: conversa de 2 perguntas --------------------------------
         # Vem antes de todo o resto porque, enquanto o rascunho está aberto, a
         # próxima mensagem é a RESPOSTA da pergunta — não pode ir para a IA.
@@ -367,7 +434,7 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
             # morre sozinho em 30 min).
             bloqueio = _gate(user_row, ACAO_CHAMADO, "chamado")
             if bloqueio:
-                return [bloqueio]
+                return bloqueio
             salvar_rascunho_chamado(internal_id, "problema")
             return [PERGUNTA_PROBLEMA]
 
@@ -392,12 +459,8 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
             vincular_telegram(texto, telegram_id)
 
             respostas = [_build_welcome(first_name, internal_id)]
-            if is_new:  # onboarding com os planos aparece só para usuário NOVO
-                respostas.append({
-                    "tipo": "botoes_planos",
-                    "mensagem": "💳 Quer lançamentos e relatórios ilimitados? Escolha um plano — "
-                                "ou é só começar a mandar seus gastos, de graça:",
-                })
+            if _precisa_escolher_plano(user_row):  # quem ainda não escolheu vê o menu com o Grátis
+                respostas.append(_menu_planos(MSG_ESCOLHA_PLANO, gratis="escolher"))
             return respostas
         
         # Comando /plano — mostra o plano atual e o uso do mês
@@ -408,10 +471,12 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
         if text and text.strip().lower().startswith("/dev"):
             return _handle_dev(text, telegram_id, first_name)
         
-        # Comando /assinar — mostra os planos pagos (botões)
-        if text and text.strip().lower().startswith("/assinar"):
-            return [{"tipo": "botoes_planos",
-                     "mensagem": "🚀 Assine o LekoAI Plus e tenha lançamentos e relatórios ilimitados:"}]
+        # /assinaturas (e o antigo /assinar) — mostra os planos pagos (botões).
+        # Quem ainda não escolheu nenhum plano vê também o botão do Grátis.
+        if comando.startswith(("/assinaturas", "/assinar")):
+            if _precisa_escolher_plano(user_row):
+                return [_menu_planos(MSG_ESCOLHA_PLANO, gratis="escolher")]
+            return [_menu_planos("🚀 Assine o LekoAI Plus e tenha lançamentos e relatórios ilimitados:")]
 
         # Camada 2 (IA): interpreta a intenção
         dados = extract_transaction(text)
@@ -425,7 +490,7 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
             usados = contar_lancamentos_mes(internal_id)
             bloqueio = _gate(user_row, "registrar", "registrar", lancamentos_mes=usados)
             if bloqueio:
-                return [bloqueio]
+                return bloqueio
 
             transacao = dados.get("transacao", {})
             sucesso = insert_transaction(
@@ -454,7 +519,7 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
             periodo_dias = _dias_no_periodo(data_inicio, data_fim)
             bloqueio = _gate(user_row, "relatorio", "relatorio-texto", periodo_dias=periodo_dias)
             if bloqueio:
-                return [bloqueio]
+                return bloqueio
 
             transacoes = get_transactions(
                 user_id=internal_id, data_inicio=data_inicio, data_fim=data_fim

@@ -66,7 +66,7 @@ de polling. Não a torne `async` e não importe `telegram` dentro dela.
 | :--- | :--- |
 | `documento` | envia arquivo (`caminho`, `legenda`) |
 | `botoes_formato` | botões PDF / Excel para relatório |
-| `botoes_planos` | botões dos 3 planos pagos |
+| `botoes_planos` | botões dos 3 planos pagos (+ `gratis`: `escolher` \| `aguardar` \| `None`) |
 | `botao_link` | botão que abre URL (checkout da Stripe) |
 
 Quem traduz esses dicts em chamadas da API do Telegram é `enviar_respostas()`
@@ -109,6 +109,7 @@ despacho dentro de `api/telegram.py` e ponha a regra de negócio num módulo de
 | `chamado_etapa` | `NULL` \| `problema` \| `esperado` — estado da conversa do `/chamado` |
 | `chamado_problema` | resposta da 1ª pergunta |
 | `chamado_iniciado_em` | expira rascunho abandonado (30 min) |
+| `plano_escolhido_em` | quando passou pelo menu de planos. `NULL` + `free` = ainda não escolheu |
 
 > O estado do `/chamado` mora em `users` de propósito: o bot já lê a linha
 > inteira do usuário em **toda** mensagem (`get_or_create_user_row`), então
@@ -190,6 +191,13 @@ o que aparece nas faturas de renovação e no cancelamento.
 
 **Plus vencido bloqueia** e o bot pede renovação — não rebaixa para o grátis.
 
+**Menu de entrada:** quem chega (pelo quiz ou pelo link direto) precisa escolher
+um plano — inclusive o Grátis (`free|escolher`) — antes de usar o bot. Até lá,
+qualquer mensagem (menos `/start`, `/assinaturas`, `/dev`) devolve o mesmo menu.
+Esse gate **não** depende do `PAYWALL_ENABLED`: não bloqueia ninguém, já que o
+Grátis é uma opção. Todo bloqueio do paywall vem com o menu de upgrade; o de
+cota mensal troca o botão do Grátis por "Aguardar o próximo mês" (`free|aguardar`).
+
 `tools/subscription.py` é um **módulo puro**: não fala com banco nem com HTTP.
 Recebe a linha do usuário já pronta e devolve um `Verdict`. Mantenha assim — é
 o que o torna testável isoladamente.
@@ -242,7 +250,7 @@ Stripe reenvia o evento se não receber 2xx rápido.
 | :--- | :--- |
 | `/start` | cadastra/saúda. Com deep link `q_<uuid>` vincula o quiz do parceiro |
 | `/plano` | mostra o plano atual e o uso do mês |
-| `/assinar` | mostra os botões dos planos pagos |
+| `/assinaturas` | mostra os botões dos planos pagos (`/assinar` continua valendo) |
 | `/chamado` | abre chamado em 2 perguntas (problema → esperado). Só plano pago |
 | `/cancelar` | cancela o rascunho de chamado em andamento |
 | `/dev` | **só admin** — simula estados de plano para teste |
