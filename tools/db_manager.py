@@ -147,6 +147,16 @@ def get_user_row_by_id(user_id: int):
     resp = _get_client().table("users").select("*").eq("id", user_id).execute()
     return resp.data[0] if resp.data else None
 
+def marcar_plano_escolhido(user_id: int) -> None:
+    """
+    Carimba que o usuário já passou pelo menu de planos (escolheu o Grátis).
+    Enquanto este campo estiver vazio e o plano for 'free', toda mensagem
+    devolve o menu de planos — ver message_handler._precisa_escolher_plano.
+    """
+    _get_client().table("users").update({
+        "plano_escolhido_em": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", user_id).execute()
+
 def salvar_rascunho_chamado(user_id: int, etapa, problema: str = None) -> None:
     """
     Guarda em que ponto do /chamado o usuário está.
