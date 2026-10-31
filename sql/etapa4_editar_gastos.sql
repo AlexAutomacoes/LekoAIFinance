@@ -12,7 +12,11 @@
 -- lançamento corrigido — e só dá para saber disso guardando o id aqui.
 -- Fica em `users` porque a linha do usuário já é lida em toda mensagem.
 alter table public.users
-  add column if not exists edicao_gasto_id integer;
+  add column if not exists edicao_gasto_id bigint;
+-- Mesmo tipo de gastos.id (bigint). A 1ª versão desta etapa criou a coluna
+-- como integer; rodar de novo só alarga o tipo (não perde dado, idempotente).
+alter table public.users
+  alter column edicao_gasto_id type bigint;
 
 -- 2) Quando a edição começou ---------------------------------------------------
 -- Edição abandonada expira (30 min): quem some e volta amanhã registra um

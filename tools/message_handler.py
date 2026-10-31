@@ -549,11 +549,15 @@ def tratar_clique_lancamento(data: str, telegram_id: int, first_name: str) -> li
 
     if acao == "edit":
         # Um /chamado pela metade e uma edição ao mesmo tempo disputariam a
-        # próxima mensagem. O clique mais recente ganha.
-        if row.get("chamado_etapa"):
+        # próxima mensagem. O clique mais recente ganha — avisando, como o
+        # /chamado já faz quando é interrompido por outro comando.
+        aviso = []
+        if _rascunho_ativo(row):
             salvar_rascunho_chamado(user_id, None)
+            aviso = ["ℹ️ Cancelei o chamado que estava pela metade. "
+                     "Depois é só mandar /chamado de novo."]
         salvar_edicao(user_id, gasto_id)
-        return [("✏️ Me mande o lançamento corrigido, do jeito que você registraria. "
+        return aviso + [("✏️ Me mande o lançamento corrigido, do jeito que você registraria. "
                  "Inclua a data se não for hoje, ex.:\n"
                  "\"gastei 45 no mercado dia 28/10\"\n\n"
                  f"Ele vai substituir este:\n{_detalhe_lancamento(g)}\n\n"
@@ -562,41 +566,70 @@ def tratar_clique_lancamento(data: str, telegram_id: int, first_name: str) -> li
     return ["Não entendi esse botão. Mande /lancamentos para ver a lista de novo."]
 
 
-def _responder_edicao(user_row, texto: str) -> list:
-    """A mensagem depois do "Editar": vira o novo conteúdo do lançamento."""
+MSG_SAIU_DA_EDICAO = ("ℹ️ Saí da edição do lançamento — ele continua como estava. "
+                      "Para corrigir, toque em Editar de novo (/lancamentos).")
+MSG_PECA_DE_NOVO = ("Não consegui entender a correção. 🤔 Me mande o lançamento completo, "
+                    "ex.: \"gastei 45 no mercado dia 28/10\" — ou /cancelar para desistir.")
+
+
+def _correcao_valida(t: dict):
+    """
+    Confere o que a IA extraiu antes de sobrescrever o lançamento. Devolve os
+    campos prontos para gravar, ou None se algo essencial veio errado.
+
+    No registro normal um dado ruim vira, no máximo, um lançamento estranho a
+    mais. Na edição ele SOBRESCREVE um lançamento bom — por isso aqui se valida.
+    """
+    status = t.get("status")
+    if status not in ("Entrada", "Saída"):
+        return None
+    try:
+        valor = abs(float(t.get("valor")))
+        data = date.fromisoformat(str(t.get("data"))).isoformat()
+    except (TypeError, ValueError):
+        return None
+    if valor == 0:
+        return None
+    return {
+        "status": status,
+        # O sinal segue o tipo (convenção do projeto: saída negativa), mesmo
+        # que a IA tenha errado o sinal.
+        "valor": -valor if status == "Saída" else valor,
+        "categoria": (t.get("categoria") or "").strip() or "Outros",  # NOT NULL no banco
+        "descricao": t.get("descricao"),
+        "data": data,
+    }
+
+
+def _aplicar_edicao(user_row, dados: dict) -> list:
+    """Grava a correção (ação "registrar" da IA) no lançamento que está sendo editado."""
     user_id = user_row["id"]
     gasto_id = user_row["edicao_gasto_id"]
 
-    # A IA interpreta igual a um registro normal; quem decide gravar é o código.
-    dados = extract_transaction(texto)
-    if dados.get("acao") != "registrar":
-        # Faltou valor, ficou ambíguo... A edição continua aberta: a pessoa
-        # responde de novo (ou manda /cancelar).
-        return [dados.get("mensagem", "Não entendi. Me mande o lançamento corrigido, "
-                                      "ex.: \"gastei 45 no mercado\".")]
+    campos = _correcao_valida(dados.get("transacao") or {})
+    if campos is None:
+        return [MSG_PECA_DE_NOVO]  # a edição continua aberta
 
-    t = dados.get("transacao", {})
-    ok = atualizar_lancamento(
-        user_id=user_id,
-        gasto_id=gasto_id,
-        status=t.get("status"),
-        valor=t.get("valor"),
-        categoria=t.get("categoria"),
-        descricao=t.get("descricao"),
-        data=t.get("data"),
-    )
+    antes = get_lancamento(user_id, gasto_id)
+    ok = antes is not None and atualizar_lancamento(user_id=user_id, gasto_id=gasto_id, **campos)
     salvar_edicao(user_id, None)
     if not ok:
         return [MSG_LANCAMENTO_SUMIU]
     # Mensagem montada aqui, e não a da IA: a dela diz "Registrei sua
     # transação", o que daria a entender que um lançamento NOVO foi criado.
-    g = get_lancamento(user_id, gasto_id) or {**t, "id": gasto_id}
-    return [f"✅ Lançamento corrigido!\n\n{_detalhe_lancamento(g)}"]
+    # Mostra o "antes" também: se o clique em Editar foi sem querer, a pessoa
+    # vê na hora o que foi substituído (e consegue registrar de novo).
+    return [f"✅ Lançamento corrigido!\n\nAgora:\n{_detalhe_lancamento({**campos, 'id': gasto_id})}"
+            f"\n\nAntes era:\n{_detalhe_lancamento(antes)}"]
 
 
-def process_message(text: str, telegram_id: int, first_name: str) -> list:
+def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dict = None) -> list:
     """
     Roteia uma mensagem do usuário e retorna a lista de respostas (strings ou objetos de controle) a enviar.
+
+    `_dados_ia` é só para uso interno: quando a edição de lançamento já pediu a
+    interpretação da IA e decidiu que a mensagem não era a correção, ela é
+    reaproveitada aqui em vez de chamar a Groq duas vezes pela mesma mensagem.
     """
     try:
         user_row, is_new = get_or_create_user_row(telegram_id=telegram_id, name=first_name, retornar_criado=True)
@@ -618,9 +651,20 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
         # Mesma lógica do rascunho de /chamado: depois do clique em "Editar", a
         # próxima mensagem é o lançamento corrigido e não pode virar um registro
         # novo. Um comando no meio desiste da edição e segue normalmente.
-        if _edicao_ativa(user_row):
+        # (_dados_ia presente = a edição já foi encerrada nesta mesma mensagem.)
+        if _dados_ia is None and _edicao_ativa(user_row):
             if not texto.startswith("/"):
-                return _responder_edicao(user_row, texto)
+                dados = extract_transaction(text)
+                if dados.get("acao") == "registrar":
+                    return _aplicar_edicao(user_row, dados)
+                if dados.get("acao") == "pedir_dados":
+                    return [dados.get("mensagem") or MSG_PECA_DE_NOVO]  # segue editando
+                # Pediu outra coisa (relatório, apagar, uma dúvida...): a pessoa
+                # desistiu de corrigir. Sai da edição e atende o pedido de verdade,
+                # em vez de engolir a mensagem até a edição expirar.
+                salvar_edicao(internal_id, None)
+                return [MSG_SAIU_DA_EDICAO] + process_message(text, telegram_id, first_name,
+                                                              _dados_ia=dados)
             salvar_edicao(internal_id, None)
             if comando.startswith("/cancelar"):
                 return ["Beleza, edição cancelada. O lançamento continua como estava. 👍"]
@@ -687,7 +731,7 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
             return resposta_manual()
 
         # Camada 2 (IA): interpreta a intenção
-        dados = extract_transaction(text)
+        dados = _dados_ia or extract_transaction(text)
         acao = dados.get("acao")
 
         if acao in ["conversar", "pedir_dados", "pedir_periodo"]:
