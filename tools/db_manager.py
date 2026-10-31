@@ -176,3 +176,80 @@ def salvar_rascunho_chamado(user_id: int, etapa, problema: str = None) -> None:
         "chamado_problema": problema,
         "chamado_iniciado_em": datetime.now(timezone.utc).isoformat() if etapa else None,
     }).eq("id", user_id).execute()
+
+
+# --- Editar / excluir lançamentos --------------------------------------------
+# Toda função abaixo filtra por id E user_id. O id do lançamento chega pelo
+# callback_data de um botão do Telegram, e um cliente modificado pode mandar
+# qualquer número ali: sem o filtro de dono, daria para apagar o gasto de outra
+# pessoa. Falha fechada — lançamento de outro usuário é tratado como inexistente.
+
+def listar_ultimos_lancamentos(user_id: int, limite: int = 10) -> list:
+    """Os lançamentos mais recentes do usuário (pela data do lançamento)."""
+    resp = (
+        _get_client()
+        .table("gastos")
+        .select("id, status, valor, categoria, descricao, data")
+        .eq("user_id", user_id)
+        .order("data", desc=True)
+        .order("id", desc=True)
+        .limit(limite)
+        .execute()
+    )
+    return resp.data
+
+def get_lancamento(user_id: int, gasto_id: int):
+    """Um lançamento do usuário, ou None se não existir ou for de outra pessoa."""
+    resp = (
+        _get_client()
+        .table("gastos")
+        .select("id, status, valor, categoria, descricao, data")
+        .eq("id", gasto_id)
+        .eq("user_id", user_id)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+def excluir_lancamento(user_id: int, gasto_id: int) -> bool:
+    """Apaga o lançamento. Devolve False se não havia nada do usuário com esse id."""
+    resp = (
+        _get_client()
+        .table("gastos")
+        .delete()
+        .eq("id", gasto_id)
+        .eq("user_id", user_id)
+        .execute()
+    )
+    return len(resp.data) > 0
+
+def atualizar_lancamento(user_id: int, gasto_id: int, status: str, valor: float,
+                         categoria: str, descricao: str, data: str) -> bool:
+    """
+    Sobrescreve os campos do lançamento. Não mexe em created_at: é ele que conta
+    a cota mensal do Grátis, e corrigir um gasto não pode gastar cota de novo.
+    """
+    resp = (
+        _get_client()
+        .table("gastos")
+        .update({
+            "status": status,
+            "valor": valor,
+            "categoria": categoria,
+            "descricao": descricao,
+            "data": data,
+        })
+        .eq("id", gasto_id)
+        .eq("user_id", user_id)
+        .execute()
+    )
+    return len(resp.data) > 0
+
+def salvar_edicao(user_id: int, gasto_id) -> None:
+    """
+    Guarda qual lançamento o usuário está corrigindo (gasto_id=None encerra).
+    Mesmo esquema do salvar_rascunho_chamado: o estado fica em `users`.
+    """
+    _get_client().table("users").update({
+        "edicao_gasto_id": gasto_id,
+        "edicao_iniciada_em": datetime.now(timezone.utc).isoformat() if gasto_id else None,
+    }).eq("id", user_id).execute()

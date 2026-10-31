@@ -45,6 +45,10 @@ async def _enviar_resposta(update: Update, resposta):
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await target.reply_text(resposta["mensagem"], reply_markup=reply_markup)
+        elif tipo == "botoes":
+            keyboard = [[InlineKeyboardButton(b["texto"], callback_data=b["dados"]) for b in linha]
+                        for linha in resposta["botoes"]]
+            await target.reply_text(resposta["mensagem"], reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await target.reply_text(resposta)
 
@@ -72,6 +76,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
 
     data = query.data
+    if data.startswith("g|"):
+        from tools.message_handler import tratar_clique_lancamento
+        user = query.from_user
+        for resp in tratar_clique_lancamento(data, user.id, user.first_name):
+            await _enviar_resposta(update, resp)
+        return
+
     if data.startswith("fmt_"):
         partes = data.split("|")
         formato = "pdf" if partes[0] == "fmt_pdf" else "excel"

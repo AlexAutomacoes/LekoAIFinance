@@ -68,6 +68,7 @@ de polling. Não a torne `async` e não importe `telegram` dentro dela.
 | `botoes_formato` | botões PDF / Excel para relatório |
 | `botoes_planos` | botões dos 3 planos pagos (+ `gratis`: `escolher` \| `aguardar` \| `None`) |
 | `botao_link` | botão que abre URL (checkout da Stripe) |
+| `botoes` | botões genéricos: `botoes` = lista de linhas de `{texto, dados}` (editar/excluir lançamento) |
 
 Quem traduz esses dicts em chamadas da API do Telegram é `enviar_respostas()`
 em `api/telegram.py`. **Adicionou um `tipo` novo? Tem que tratar lá também**,
@@ -110,6 +111,8 @@ despacho dentro de `api/telegram.py` e ponha a regra de negócio num módulo de
 | `chamado_problema` | resposta da 1ª pergunta |
 | `chamado_iniciado_em` | expira rascunho abandonado (30 min) |
 | `plano_escolhido_em` | quando passou pelo menu de planos. `NULL` + `free` = ainda não escolheu |
+| `edicao_gasto_id` | lançamento que o usuário está corrigindo (clicou em "Editar"). `NULL` = nenhum |
+| `edicao_iniciada_em` | expira edição abandonada (30 min) |
 
 > O estado do `/chamado` mora em `users` de propósito: o bot já lê a linha
 > inteira do usuário em **toda** mensagem (`get_or_create_user_row`), então
@@ -252,7 +255,9 @@ Stripe reenvia o evento se não receber 2xx rápido.
 | `/plano` | mostra o plano atual e o uso do mês |
 | `/assinaturas` | mostra os botões dos planos pagos (`/assinar` continua valendo) |
 | `/chamado` | abre chamado em 2 perguntas (problema → esperado). Só plano pago |
-| `/cancelar` | cancela o rascunho de chamado em andamento |
+| `/cancelar` | cancela o rascunho de chamado ou a edição de lançamento em andamento |
+| `/lancamentos` | últimos 10 lançamentos em botões → editar ou excluir. Todos os planos, sem paywall |
+| `/manual` | envia o Guia do Usuário em PDF (`tools/assets/`) |
 | `/dev` | **só admin** — simula estados de plano para teste |
 
 Qualquer outra mensagem vai para a Camada 2 (IA).
@@ -276,12 +281,21 @@ ouro do módulo: *nada ali pode derrubar o `/start`* — qualquer falha vira log
 
 `extract_transaction` roda com **JSON Mode** (`response_format={"type": "json_object"}`)
 e `temperature=0.0` — blindagem contra erro de parse e markdown no meio do JSON.
-Devolve uma das 5 ações: `conversar`, `pedir_dados`, `registrar`, `pedir_periodo`, `relatorio`.
+Devolve uma das 6 ações: `conversar`, `pedir_dados`, `registrar`, `pedir_periodo`, `relatorio`, `gerenciar`.
+
+`gerenciar` só **mostra a lista** de lançamentos: quem edita ou apaga é sempre um clique
+num botão (`g|...`, ver `message_handler.tratar_clique_lancamento`). Toda leitura e escrita
+de lançamento filtra por `id` **e** `user_id` — o id vem do `callback_data`, que pode ser forjado.
 
 **Regra "Não Adivinhe":** se faltar valor ou a mensagem for ambígua, o bot
 **pergunta** (`pedir_dados` / `pedir_periodo`). Nunca presume um número.
 
 ---
+
+### Manual do usuário
+`tools/assets/Guia-do-Usuario-LekoAI-Finance.pdf` é exportado do doc "LekoAI Finance — Guia
+do Usuário" (Claude Docs). Vai no `/manual`, na 1ª escolha do Grátis e na 1ª ativação paga
+(não na renovação). Mudou comando, preço ou fluxo? Atualize o doc, exporte e substitua o arquivo.
 
 ## 9. Arquivos temporários
 
@@ -309,6 +323,7 @@ tools/
   excel_report.py          relatório em .xlsx
   telegram_bot.py          bot LOCAL em polling (dev); produção usa o webhook
   test_quiz_link.py        teste manual do vínculo do quiz (não roda no CI)
+  assets/                  Guia do Usuário em PDF (enviado pelo /manual)
 public/dashboard.html      Central de Atendimento: filas N1/N2 + Monitoramento (login via Supabase Auth)
 architecture/              POPs da Camada 1 + migração de chamados
 sql/                       migrações (idempotentes e aditivas)

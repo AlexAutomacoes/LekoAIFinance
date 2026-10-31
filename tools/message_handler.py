@@ -6,6 +6,7 @@ Não depende de python-telegram-bot, por isso é reusada tanto pelo bot local (p
 `tools/telegram_bot.py`) quanto pelo endpoint serverless de webhook (`api/telegram.py`).
 """
 import logging
+import os
 from datetime import date, datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -19,6 +20,11 @@ from tools.db_manager import (
     get_user_row_by_id,
     salvar_rascunho_chamado,
     marcar_plano_escolhido,
+    listar_ultimos_lancamentos,
+    get_lancamento,
+    excluir_lancamento,
+    atualizar_lancamento,
+    salvar_edicao,
 )
 from tools.llm_router import extract_transaction, generate_financial_tips
 from tools.pdf_report import gerar_pdf_relatorio
@@ -49,6 +55,20 @@ PERGUNTA_PROBLEMA = ("🛠️ Vamos abrir um chamado.\n\n"
                      "(Para desistir, é só mandar /cancelar.)")
 PERGUNTA_ESPERADO = "2/2 — Como o sistema deveria se comportar?"
 TAMANHO_MINIMO_RESPOSTA = 5
+
+# --- Editar / excluir lançamento ----------------------------------------------
+# Mesmo prazo do /chamado, pelo mesmo motivo: quem clica em "Editar" e some não
+# pode, amanhã, sobrescrever sem querer o lançamento antigo com um gasto novo.
+EDICAO_EXPIRA_MIN = 30
+LIMITE_LISTA_LANCAMENTOS = 10
+
+# --- Manual do usuário ---------------------------------------------------------
+# PDF pronto, versionado no repositório (feito no Claude Docs e exportado). Não é
+# gerado em runtime: o layout do documento é bem melhor do que o que o fpdf faz
+# com as fontes core, e o conteúdo muda pouco. Mudou um comando? Atualize o doc,
+# exporte de novo e substitua o arquivo.
+CAMINHO_MANUAL = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "assets", "Guia-do-Usuario-LekoAI-Finance.pdf")
 
 def gerar_relatorio_por_formato(user_id: int, first_name: str, data_inicio: str, data_fim: str, formato: str) -> list:
     """
@@ -93,8 +113,19 @@ def _build_welcome(name: str, internal_id: int) -> str:
         f"É só me mandar coisas como \"gastei 50 no mercado\" ou \"recebi 2000 de salário\" que eu "
         f"registro tudo automaticamente. Quando quiser, é só pedir um relatório. 📊\n\n"
         f"🆓 No plano Grátis: 20 lançamentos por mês + relatórios de até 7 dias.\n\n"
+        f"✏️ Errou um lançamento? /lancamentos para corrigir ou excluir.\n"
+        f"📘 Manual completo, passo a passo: /manual\n"
         f"🛠️ Nos planos pagos você ainda abre chamado direto com a equipe: /chamado"
     )
+
+
+def resposta_manual() -> list:
+    """O manual em PDF. Usado pelo /manual, na escolha do Grátis e no 1º pagamento."""
+    return [{
+        "tipo": "documento",
+        "caminho": CAMINHO_MANUAL,
+        "legenda": "📘 Manual do LekoAI Finance — tudo o que dá para fazer, passo a passo.",
+    }]
 
 
 def _fmt_moeda(valor: float) -> str:
@@ -304,8 +335,12 @@ MSG_ESCOLHA_PLANO = ("👇 Para começar, escolha um plano — o Grátis também
 def escolher_plano_gratis(telegram_id: int, first_name: str) -> list:
     """Clique no botão do Grátis: libera o uso e explica os limites."""
     row = get_or_create_user_row(telegram_id, first_name)
-    if not row.get("plano_escolhido_em"):
+    primeira_escolha = not row.get("plano_escolhido_em")
+    if primeira_escolha:
         marcar_plano_escolhido(row["id"])
+    # O manual vai só na 1ª escolha: clicar de novo num menu antigo do chat não
+    # deve reenviar o PDF. Depois disso, quem quiser pede pelo /manual.
+    manual = resposta_manual() if primeira_escolha else []
     return [
         "🆓 Pronto, você está no plano Grátis!\n\n"
         "O que vale nele:\n"
@@ -315,7 +350,7 @@ def escolher_plano_gratis(telegram_id: int, first_name: str) -> list:
         "Quando quiser lançamentos e relatórios ilimitados, é só digitar "
         "/assinaturas e fazer o upgrade. 🚀\n\n"
         "Já pode começar: me mande algo como \"gastei 50 no mercado\". 😉"
-    ]
+    ] + manual
 
 
 def aguardar_proximo_mes() -> list:
@@ -362,18 +397,29 @@ def _gate(user_row, acao, contexto, *, lancamentos_mes=0, periodo_dias=0):
                     contexto, user_row.get("telegram_id"), verdict.motivo, verdict.meta)
     return None                
 
+def _dentro_do_prazo(iniciado_em, minutos: int) -> bool:
+    """O estado de conversa iniciado em `iniciado_em` ainda não expirou?"""
+    try:
+        iniciado = datetime.fromisoformat(str(iniciado_em).replace("Z", "+00:00"))
+        if iniciado.tzinfo is None:
+            iniciado = iniciado.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False  # sem data confiável, trata como se não houvesse estado
+    return datetime.now(timezone.utc) - iniciado < timedelta(minutes=minutos)
+
+
 def _rascunho_ativo(user_row) -> bool:
     """A pessoa está no meio de um /chamado e o rascunho ainda vale?"""
     if not user_row.get("chamado_etapa"):
         return False
-    try:
-        iniciado = datetime.fromisoformat(
-            str(user_row.get("chamado_iniciado_em")).replace("Z", "+00:00"))
-        if iniciado.tzinfo is None:
-            iniciado = iniciado.replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        return False  # sem data confiável, trata como se não houvesse rascunho
-    return datetime.now(timezone.utc) - iniciado < timedelta(minutes=CHAMADO_EXPIRA_MIN)
+    return _dentro_do_prazo(user_row.get("chamado_iniciado_em"), CHAMADO_EXPIRA_MIN)
+
+
+def _edicao_ativa(user_row) -> bool:
+    """A pessoa clicou em "Editar" e a próxima mensagem é o lançamento corrigido?"""
+    if not user_row.get("edicao_gasto_id"):
+        return False
+    return _dentro_do_prazo(user_row.get("edicao_iniciada_em"), EDICAO_EXPIRA_MIN)
 
 
 def _responder_chamado(user_row, texto: str, first_name: str) -> list:
@@ -405,9 +451,185 @@ def _responder_chamado(user_row, texto: str, first_name: str) -> list:
             f"Obrigado por reportar — a equipe vai analisar. 🙏"]
 
 
-def process_message(text: str, telegram_id: int, first_name: str) -> list:
+# --- Editar / excluir lançamento ----------------------------------------------
+# Quem apaga ou altera é sempre um clique num botão, nunca a IA: ela só entende
+# que a pessoa QUER mexer num lançamento (ação "gerenciar") e o bot mostra a
+# lista. É a invariante do projeto — o LLM interpreta, o código grava.
+#
+# callback_data dos botões (limite do Telegram: 64 bytes):
+#   g|lista        mostra os últimos lançamentos de novo
+#   g|ver|<id>     detalhe do lançamento + botões Editar/Excluir
+#   g|del|<id>     pede confirmação da exclusão
+#   g|delok|<id>   exclui de fato
+#   g|edit|<id>    começa a edição (a próxima mensagem é o lançamento corrigido)
+
+MSG_LANCAMENTO_SUMIU = "🤔 Não encontrei esse lançamento — talvez ele já tenha sido excluído."
+
+
+def _valor_com_sinal(valor) -> str:
+    """-50.0 -> '-R$ 50,00'; 2000 -> '+R$ 2.000,00'."""
+    return f"{'-' if valor < 0 else '+'}R$ {_fmt_moeda(valor)}"
+
+
+def _detalhe_lancamento(g: dict) -> str:
+    return (f"• Tipo: {g['status']}\n"
+            f"• Valor: R$ {_fmt_moeda(g['valor'])}\n"
+            f"• Categoria: {g.get('categoria') or '—'}\n"
+            f"• Descrição: {g.get('descricao') or '—'}\n"
+            f"• Data: {_fmt_data(g['data'])}")
+
+
+def _lista_lancamentos(user_id: int, mensagem: str) -> list:
+    """Os últimos lançamentos, um botão por linha, para a pessoa escolher."""
+    lancamentos = listar_ultimos_lancamentos(user_id, LIMITE_LISTA_LANCAMENTOS)
+    if not lancamentos:
+        return ["Você ainda não tem nenhum lançamento. 🙂\n\n"
+                "Para registrar, me mande algo como \"gastei 50 no mercado\"."]
+    linhas = []
+    for g in lancamentos:
+        data_curta = _fmt_data(g["data"])[:5]  # 'DD/MM'
+        texto = f"{data_curta} · {g.get('categoria') or 'Sem categoria'} · {_valor_com_sinal(g['valor'])}"
+        linhas.append([{"texto": texto, "dados": f"g|ver|{g['id']}"}])
+    return [{"tipo": "botoes", "mensagem": mensagem, "botoes": linhas}]
+
+
+MSG_LISTA = (f"🧾 Seus últimos {LIMITE_LISTA_LANCAMENTOS} lançamentos.\n"
+             "Toque no que você quer corrigir ou excluir 👇")
+
+
+def tratar_clique_lancamento(data: str, telegram_id: int, first_name: str) -> list:
+    """Clique num dos botões g|... (ver acima). Devolve a lista de respostas."""
+    partes = data.split("|")
+    acao = partes[1] if len(partes) > 1 else ""
+    row = get_or_create_user_row(telegram_id, first_name)
+    user_id = row["id"]
+
+    if acao == "lista":
+        return _lista_lancamentos(user_id, MSG_LISTA)
+
+    try:
+        gasto_id = int(partes[2])
+    except (IndexError, ValueError):
+        return ["Não entendi esse botão. Mande /lancamentos para ver a lista de novo."]
+
+    # Lê do banco filtrando pelo dono: um id forjado de outra pessoa cai aqui
+    # como "não encontrado", igual a um lançamento que já foi apagado.
+    g = get_lancamento(user_id, gasto_id)
+    if g is None:
+        return [MSG_LANCAMENTO_SUMIU]
+
+    if acao == "ver":
+        return [{
+            "tipo": "botoes",
+            "mensagem": f"🧾 Lançamento selecionado\n\n{_detalhe_lancamento(g)}\n\nO que você quer fazer?",
+            "botoes": [
+                [{"texto": "✏️ Editar", "dados": f"g|edit|{gasto_id}"},
+                 {"texto": "🗑️ Excluir", "dados": f"g|del|{gasto_id}"}],
+                [{"texto": "⬅️ Voltar à lista", "dados": "g|lista"}],
+            ],
+        }]
+
+    if acao == "del":
+        # Confirmação em dois passos: a exclusão é definitiva.
+        return [{
+            "tipo": "botoes",
+            "mensagem": (f"⚠️ Tem certeza que quer excluir este lançamento? "
+                         f"Não dá para desfazer.\n\n{_detalhe_lancamento(g)}"),
+            "botoes": [[{"texto": "✅ Sim, excluir", "dados": f"g|delok|{gasto_id}"},
+                        {"texto": "Não", "dados": f"g|ver|{gasto_id}"}]],
+        }]
+
+    if acao == "delok":
+        if not excluir_lancamento(user_id, gasto_id):
+            return [MSG_LANCAMENTO_SUMIU]
+        # Se ele estava editando justamente este, a edição não tem mais alvo.
+        if row.get("edicao_gasto_id") == gasto_id:
+            salvar_edicao(user_id, None)
+        return ["🗑️ Lançamento excluído.\n\nQuer mexer em mais algum? /lancamentos"]
+
+    if acao == "edit":
+        # Um /chamado pela metade e uma edição ao mesmo tempo disputariam a
+        # próxima mensagem. O clique mais recente ganha — avisando, como o
+        # /chamado já faz quando é interrompido por outro comando.
+        aviso = []
+        if _rascunho_ativo(row):
+            salvar_rascunho_chamado(user_id, None)
+            aviso = ["ℹ️ Cancelei o chamado que estava pela metade. "
+                     "Depois é só mandar /chamado de novo."]
+        salvar_edicao(user_id, gasto_id)
+        return aviso + [("✏️ Me mande o lançamento corrigido, do jeito que você registraria. "
+                 "Inclua a data se não for hoje, ex.:\n"
+                 "\"gastei 45 no mercado dia 28/10\"\n\n"
+                 f"Ele vai substituir este:\n{_detalhe_lancamento(g)}\n\n"
+                 "(Para desistir, é só mandar /cancelar.)")]
+
+    return ["Não entendi esse botão. Mande /lancamentos para ver a lista de novo."]
+
+
+MSG_SAIU_DA_EDICAO = ("ℹ️ Saí da edição do lançamento — ele continua como estava. "
+                      "Para corrigir, toque em Editar de novo (/lancamentos).")
+MSG_PECA_DE_NOVO = ("Não consegui entender a correção. 🤔 Me mande o lançamento completo, "
+                    "ex.: \"gastei 45 no mercado dia 28/10\" — ou /cancelar para desistir.")
+
+
+def _correcao_valida(t: dict):
+    """
+    Confere o que a IA extraiu antes de sobrescrever o lançamento. Devolve os
+    campos prontos para gravar, ou None se algo essencial veio errado.
+
+    No registro normal um dado ruim vira, no máximo, um lançamento estranho a
+    mais. Na edição ele SOBRESCREVE um lançamento bom — por isso aqui se valida.
+    """
+    status = t.get("status")
+    if status not in ("Entrada", "Saída"):
+        return None
+    try:
+        valor = abs(float(t.get("valor")))
+        data = date.fromisoformat(str(t.get("data"))).isoformat()
+    except (TypeError, ValueError):
+        return None
+    if valor == 0:
+        return None
+    return {
+        "status": status,
+        # O sinal segue o tipo (convenção do projeto: saída negativa), mesmo
+        # que a IA tenha errado o sinal.
+        "valor": -valor if status == "Saída" else valor,
+        "categoria": (t.get("categoria") or "").strip() or "Outros",  # NOT NULL no banco
+        "descricao": t.get("descricao"),
+        "data": data,
+    }
+
+
+def _aplicar_edicao(user_row, dados: dict) -> list:
+    """Grava a correção (ação "registrar" da IA) no lançamento que está sendo editado."""
+    user_id = user_row["id"]
+    gasto_id = user_row["edicao_gasto_id"]
+
+    campos = _correcao_valida(dados.get("transacao") or {})
+    if campos is None:
+        return [MSG_PECA_DE_NOVO]  # a edição continua aberta
+
+    antes = get_lancamento(user_id, gasto_id)
+    ok = antes is not None and atualizar_lancamento(user_id=user_id, gasto_id=gasto_id, **campos)
+    salvar_edicao(user_id, None)
+    if not ok:
+        return [MSG_LANCAMENTO_SUMIU]
+    # Mensagem montada aqui, e não a da IA: a dela diz "Registrei sua
+    # transação", o que daria a entender que um lançamento NOVO foi criado.
+    # Mostra o "antes" também: se o clique em Editar foi sem querer, a pessoa
+    # vê na hora o que foi substituído (e consegue registrar de novo).
+    return [f"✅ Lançamento corrigido!\n\nAgora:\n{_detalhe_lancamento({**campos, 'id': gasto_id})}"
+            f"\n\nAntes era:\n{_detalhe_lancamento(antes)}"]
+
+
+def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dict = None) -> list:
     """
     Roteia uma mensagem do usuário e retorna a lista de respostas (strings ou objetos de controle) a enviar.
+
+    `_dados_ia` é só para uso interno: quando a edição de lançamento já pediu a
+    interpretação da IA e decidiu que a mensagem não era a correção, ela é
+    reaproveitada aqui em vez de chamar a Groq duas vezes pela mesma mensagem.
     """
     try:
         user_row, is_new = get_or_create_user_row(telegram_id=telegram_id, name=first_name, retornar_criado=True)
@@ -424,6 +646,28 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
         if _precisa_escolher_plano(user_row) and not comando.startswith(
                 ("/start", "/assinaturas", "/assinar", "/dev")):
             return [_menu_planos(MSG_ESCOLHA_PLANO, gratis="escolher")]
+
+        # --- Edição de lançamento em andamento --------------------------------
+        # Mesma lógica do rascunho de /chamado: depois do clique em "Editar", a
+        # próxima mensagem é o lançamento corrigido e não pode virar um registro
+        # novo. Um comando no meio desiste da edição e segue normalmente.
+        # (_dados_ia presente = a edição já foi encerrada nesta mesma mensagem.)
+        if _dados_ia is None and _edicao_ativa(user_row):
+            if not texto.startswith("/"):
+                dados = extract_transaction(text)
+                if dados.get("acao") == "registrar":
+                    return _aplicar_edicao(user_row, dados)
+                if dados.get("acao") == "pedir_dados":
+                    return [dados.get("mensagem") or MSG_PECA_DE_NOVO]  # segue editando
+                # Pediu outra coisa (relatório, apagar, uma dúvida...): a pessoa
+                # desistiu de corrigir. Sai da edição e atende o pedido de verdade,
+                # em vez de engolir a mensagem até a edição expirar.
+                salvar_edicao(internal_id, None)
+                return [MSG_SAIU_DA_EDICAO] + process_message(text, telegram_id, first_name,
+                                                              _dados_ia=dados)
+            salvar_edicao(internal_id, None)
+            if comando.startswith("/cancelar"):
+                return ["Beleza, edição cancelada. O lançamento continua como estava. 👍"]
 
         # --- /chamado: conversa de 2 perguntas --------------------------------
         # Vem antes de todo o resto porque, enquanto o rascunho está aberto, a
@@ -478,12 +722,23 @@ def process_message(text: str, telegram_id: int, first_name: str) -> list:
                 return [_menu_planos(MSG_ESCOLHA_PLANO, gratis="escolher")]
             return [_menu_planos("🚀 Assine o LekoAI Plus e tenha lançamentos e relatórios ilimitados:")]
 
+        # Editar/excluir não passa pelo paywall: mexer nos próprios dados (até
+        # apagar) não pode depender de plano — nem para quem está com o Plus vencido.
+        if comando.startswith("/lancamentos"):
+            return _lista_lancamentos(internal_id, MSG_LISTA)
+
+        if comando.startswith("/manual"):
+            return resposta_manual()
+
         # Camada 2 (IA): interpreta a intenção
-        dados = extract_transaction(text)
+        dados = _dados_ia or extract_transaction(text)
         acao = dados.get("acao")
 
         if acao in ["conversar", "pedir_dados", "pedir_periodo"]:
             return [dados.get("mensagem", "Desculpe, não entendi.")]
+
+        elif acao == "gerenciar":
+            return _lista_lancamentos(internal_id, dados.get("mensagem") or MSG_LISTA)
 
         elif acao == "registrar":
             # Gate: no plano Grátis, até 20 lançamentos/mês.
