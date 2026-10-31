@@ -143,6 +143,12 @@ Separada de `users` porque **o webhook pode chegar antes de o comprador existir*
 (n1 → n2) e o status **volta para `aberto`** — o problema do cliente continua de
 pé, só trocou de dono. Um chamado escalado nunca fica `resolvido`.
 
+**Resolver pelo dashboard avisa o cliente.** Em chamado de cliente (`test_name`
+`telegram:<id> (Nome)`), o botão Resolver pede a resposta e manda `notificar_cliente: true`;
+o `chamados_service.patch` envia "chamado nº X resolvido" + a nota no Telegram do cliente e
+devolve `cliente_notificado` para o dashboard mostrar se deu certo. O N1 automático **não**
+manda essa flag, porque já envia a própria mensagem — senão o cliente receberia duas.
+
 **O heartbeat do CI (`type='status'`) não é chamado, é telemetria.** Ele fica
 fora das filas de N1/N2 e aparece no painel "Monitoramento" do dashboard. Sem
 essa separação, ~80% da fila do N1 seria ruído de "Bateria: 6/6 OK". O filtro
