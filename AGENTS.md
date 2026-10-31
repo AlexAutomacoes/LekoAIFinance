@@ -113,6 +113,8 @@ despacho dentro de `api/telegram.py` e ponha a regra de negócio num módulo de
 | `plano_escolhido_em` | quando passou pelo menu de planos. `NULL` + `free` = ainda não escolheu |
 | `edicao_gasto_id` | lançamento que o usuário está corrigindo (clicou em "Editar"). `NULL` = nenhum |
 | `edicao_iniciada_em` | expira edição abandonada (30 min) |
+| `categoria_etapa` | `NULL` \| `nova` \| `renomear:<id>` — a próxima mensagem é o nome de uma categoria |
+| `categoria_iniciada_em` | expira a espera do nome (30 min) |
 
 > O estado do `/chamado` mora em `users` de propósito: o bot já lê a linha
 > inteira do usuário em **toda** mensagem (`get_or_create_user_row`), então
@@ -121,6 +123,14 @@ despacho dentro de `api/telegram.py` e ponha a regra de negócio num módulo de
 ### `gastos`
 `user_id` (integer), `status` (`"Entrada"` / `"Saída"`), `valor` (float —
 **negativo = saída, positivo = entrada**), `categoria`, `descricao`, `data` (`YYYY-MM-DD`).
+
+### `categorias`
+`user_id`, `nome`, `padrao` (bool). Índice único em `(user_id, lower(nome))`. A lista nasce
+no primeiro uso (`db_manager.listar_categorias`): as `CATEGORIAS_PADRAO` + as que o usuário
+já usava nos lançamentos, todas com `padrao=true`. Só as criadas depois (`padrao=false`)
+contam no limite do Grátis. Renomear leva os lançamentos junto (e, se o nome já existe,
+junta as duas); excluir move os lançamentos para **"Outros"**, a categoria reserva, que não
+pode ser renomeada nem excluída.
 
 ### `pagamentos`
 `order_id` (único, garante idempotência do webhook — `pi_...` na compra única, `in_...`
@@ -197,6 +207,8 @@ o que aparece nas faturas de renovação e no cancelamento.
 - 20 lançamentos por mês (`LIMITE_LANCAMENTOS_FREE`)
 - relatório de no máximo 7 dias (`LIMITE_DIAS_RELATORIO_FREE`)
 - abrir `/chamado` é **exclusivo de plano pago**
+- criar até 3 categorias próprias (`LIMITE_CATEGORIAS_FREE`); renomear/excluir é livre.
+  Teto de 30 categorias para todos os planos (cada uma vira botão e entra no prompt)
 
 **Plus vencido bloqueia** e o bot pede renovação — não rebaixa para o grátis.
 
@@ -264,6 +276,7 @@ Stripe reenvia o evento se não receber 2xx rápido.
 | `/cancelar` | cancela o rascunho de chamado ou a edição de lançamento em andamento |
 | `/lancamentos` | últimos 10 lançamentos em botões → editar ou excluir. Todos os planos, sem paywall |
 | `/manual` | envia o Guia do Usuário em PDF (`tools/assets/`) |
+| `/categorias` | lista as categorias em botões (`c|...`): criar, renomear, excluir |
 | `/dev` | **só admin** — simula estados de plano para teste |
 
 Qualquer outra mensagem vai para a Camada 2 (IA).
@@ -292,6 +305,12 @@ Devolve uma das 6 ações: `conversar`, `pedir_dados`, `registrar`, `pedir_perio
 `gerenciar` só **mostra a lista** de lançamentos: quem edita ou apaga é sempre um clique
 num botão (`g|...`, ver `message_handler.tratar_clique_lancamento`). Toda leitura e escrita
 de lançamento filtra por `id` **e** `user_id` — o id vem do `callback_data`, que pode ser forjado.
+
+**Categorias:** `extract_transaction(texto, categorias)` recebe a lista do usuário e a
+IA deve escolher uma delas. Quem garante é o código (`message_handler._categoria_da_lista`):
+nome igual (ignorando maiúsculas) ou quase igual vira o da lista; o resto vira "Outros".
+Quando o código troca a categoria, a confirmação do registro é montada pelo código, não
+pela IA — senão ela citaria uma categoria diferente da gravada.
 
 **Regra "Não Adivinhe":** se faltar valor ou a mensagem for ambígua, o bot
 **pergunta** (`pedir_dados` / `pedir_periodo`). Nunca presume um número.

@@ -83,6 +83,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await _enviar_resposta(update, resp)
         return
 
+    if data.startswith("c|"):
+        from tools.message_handler import tratar_clique_categoria
+        user = query.from_user
+        for resp in tratar_clique_categoria(data, user.id, user.first_name):
+            await _enviar_resposta(update, resp)
+        return
+
     if data.startswith("fmt_"):
         partes = data.split("|")
         formato = "pdf" if partes[0] == "fmt_pdf" else "excel"

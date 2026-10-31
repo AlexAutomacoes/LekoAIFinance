@@ -253,3 +253,139 @@ def salvar_edicao(user_id: int, gasto_id) -> None:
         "edicao_gasto_id": gasto_id,
         "edicao_iniciada_em": datetime.now(timezone.utc).isoformat() if gasto_id else None,
     }).eq("id", user_id).execute()
+
+
+# --- Categorias personalizadas -------------------------------------------------
+# Mesma regra de dono do editar/excluir: o id da categoria chega pelo
+# callback_data de um botão, então tudo filtra por id E user_id.
+
+# Lista com que todo usuário começa (editável). "Outros" é a reserva: é para lá
+# que vão os lançamentos de uma categoria excluída e o que a IA não souber
+# classificar — por isso não pode ser renomeada nem excluída.
+CATEGORIAS_PADRAO = ["Alimentação", "Transporte", "Moradia", "Contas", "Saúde", "Educação",
+                     "Lazer", "Vestuário", "Salário", "Investimentos", "Outros"]
+CATEGORIA_RESERVA = "Outros"
+
+
+def _chave(nome: str) -> str:
+    """Nome normalizado para comparar ("  lazer " == "Lazer")."""
+    return " ".join((nome or "").split()).casefold()
+
+
+def listar_categorias(user_id: int) -> list:
+    """
+    As categorias do usuário, em ordem alfabética. Na primeira vez, cria a lista:
+    a padrão + as categorias que ele já usava nos lançamentos (para o histórico
+    dele continuar batendo com a lista — "Renda Fixa", "PLR"...). Todas entram
+    como `padrao`, então não gastam o limite do Grátis.
+    """
+    sb = _get_client()
+    resp = (sb.table("categorias").select("id, nome, padrao")
+            .eq("user_id", user_id).order("nome").execute())
+    if resp.data:
+        return resp.data
+
+    usadas = (sb.table("gastos").select("categoria").eq("user_id", user_id).execute()).data
+    nomes, vistos = [], set()
+    for nome in CATEGORIAS_PADRAO + [g["categoria"] for g in usadas]:
+        nome = " ".join((nome or "").split())
+        if nome and _chave(nome) not in vistos:
+            vistos.add(_chave(nome))
+            nomes.append(nome)
+    try:
+        sb.table("categorias").insert(
+            [{"user_id": user_id, "nome": n, "padrao": True} for n in nomes]).execute()
+    except Exception:
+        # Duas mensagens chegando juntas podem tentar criar a lista ao mesmo
+        # tempo; o índice único barra a segunda e basta reler.
+        pass
+    return (sb.table("categorias").select("id, nome, padrao")
+            .eq("user_id", user_id).order("nome").execute()).data
+
+
+def get_categoria(user_id: int, categoria_id: int):
+    resp = (_get_client().table("categorias").select("id, nome, padrao")
+            .eq("id", categoria_id).eq("user_id", user_id).execute())
+    return resp.data[0] if resp.data else None
+
+
+def contar_categorias_proprias(user_id: int) -> int:
+    """Quantas o usuário CRIOU (as da lista inicial não contam no limite)."""
+    resp = (_get_client().table("categorias").select("id", count="exact")
+            .eq("user_id", user_id).eq("padrao", False).execute())
+    return resp.count if resp.count is not None else len(resp.data)
+
+
+def contar_lancamentos_categoria(user_id: int, nome: str) -> int:
+    resp = (_get_client().table("gastos").select("id", count="exact")
+            .eq("user_id", user_id).eq("categoria", nome).execute())
+    return resp.count if resp.count is not None else len(resp.data)
+
+
+def criar_categoria(user_id: int, nome: str):
+    """Cria a categoria. Devolve a linha, ou None se já existe uma com esse nome."""
+    if any(_chave(c["nome"]) == _chave(nome) for c in listar_categorias(user_id)):
+        return None
+    resp = (_get_client().table("categorias")
+            .insert({"user_id": user_id, "nome": nome, "padrao": False}).execute())
+    return resp.data[0] if resp.data else None
+
+
+def _mover_lancamentos(user_id: int, de: str, para: str) -> int:
+    resp = (_get_client().table("gastos").update({"categoria": para})
+            .eq("user_id", user_id).eq("categoria", de).execute())
+    return len(resp.data)
+
+
+def renomear_categoria(user_id: int, categoria_id: int, novo_nome: str):
+    """
+    Renomeia e leva junto os lançamentos que usavam o nome antigo.
+
+    Se já existe outra categoria com o novo nome, as duas viram uma só ("Roupas"
+    -> "Vestuário"): os lançamentos passam para a existente e a antiga some.
+    Devolve (resultado, lançamentos_movidos), com resultado 'renomeada' |
+    'juntada' | 'mesmo_nome' | 'nao_encontrada'.
+    """
+    cat = get_categoria(user_id, categoria_id)
+    if cat is None:
+        return "nao_encontrada", 0
+    if cat["nome"] == novo_nome:
+        return "mesmo_nome", 0
+    destino = next((c for c in listar_categorias(user_id)
+                    if _chave(c["nome"]) == _chave(novo_nome) and c["id"] != categoria_id), None)
+    sb = _get_client()
+    if destino:
+        movidos = _mover_lancamentos(user_id, cat["nome"], destino["nome"])
+        sb.table("categorias").delete().eq("id", categoria_id).eq("user_id", user_id).execute()
+        return "juntada", movidos
+    # Só mudou maiúscula/minúscula ("lazer" -> "Lazer") ou é um nome novo.
+    sb.table("categorias").update({"nome": novo_nome}).eq("id", categoria_id).eq("user_id", user_id).execute()
+    return "renomeada", _mover_lancamentos(user_id, cat["nome"], novo_nome)
+
+
+def excluir_categoria(user_id: int, categoria_id: int):
+    """
+    Exclui a categoria e passa os lançamentos dela para "Outros".
+    Devolve quantos foram movidos, ou None se a categoria não existe.
+    """
+    cat = get_categoria(user_id, categoria_id)
+    if cat is None:
+        return None
+    movidos = _mover_lancamentos(user_id, cat["nome"], CATEGORIA_RESERVA)
+    _get_client().table("categorias").delete().eq("id", categoria_id).eq("user_id", user_id).execute()
+    # "Outros" sempre existe na lista: é o destino de quem foi excluída.
+    if not any(_chave(c["nome"]) == _chave(CATEGORIA_RESERVA) for c in listar_categorias(user_id)):
+        _get_client().table("categorias").insert(
+            {"user_id": user_id, "nome": CATEGORIA_RESERVA, "padrao": True}).execute()
+    return movidos
+
+
+def salvar_etapa_categoria(user_id: int, etapa) -> None:
+    """
+    Guarda se a próxima mensagem é o nome de uma categoria ('nova' ou
+    'renomear:<id>'); etapa=None encerra. Mesmo esquema do salvar_edicao.
+    """
+    _get_client().table("users").update({
+        "categoria_etapa": etapa,
+        "categoria_iniciada_em": datetime.now(timezone.utc).isoformat() if etapa else None,
+    }).eq("id", user_id).execute()

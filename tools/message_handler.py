@@ -5,6 +5,7 @@ Função síncrona e pura: recebe o texto do usuário e devolve a(s) resposta(s)
 Não depende de python-telegram-bot, por isso é reusada tanto pelo bot local (polling,
 `tools/telegram_bot.py`) quanto pelo endpoint serverless de webhook (`api/telegram.py`).
 """
+import difflib
 import logging
 import os
 from datetime import date, datetime, timezone, timedelta
@@ -25,6 +26,15 @@ from tools.db_manager import (
     excluir_lancamento,
     atualizar_lancamento,
     salvar_edicao,
+    listar_categorias,
+    get_categoria,
+    contar_categorias_proprias,
+    contar_lancamentos_categoria,
+    criar_categoria,
+    renomear_categoria,
+    excluir_categoria,
+    salvar_etapa_categoria,
+    CATEGORIA_RESERVA,
 )
 from tools.llm_router import extract_transaction, generate_financial_tips
 from tools.pdf_report import gerar_pdf_relatorio
@@ -38,6 +48,9 @@ from tools.subscription import (
     MOTIVO_EXPIRADO,
     MOTIVO_SO_PAGO,
     ACAO_CHAMADO,
+    ACAO_CRIAR_CATEGORIA,
+    MOTIVO_LIMITE_CATEGORIAS,
+    LIMITE_CATEGORIAS_FREE,
 )
 from tools.payment_service import criar_checkout
 from tools.quiz_link import vincular_telegram
@@ -114,6 +127,7 @@ def _build_welcome(name: str, internal_id: int) -> str:
         f"registro tudo automaticamente. Quando quiser, é só pedir um relatório. 📊\n\n"
         f"🆓 No plano Grátis: 20 lançamentos por mês + relatórios de até 7 dias.\n\n"
         f"✏️ Errou um lançamento? /lancamentos para corrigir ou excluir.\n"
+        f"🏷️ Suas categorias: /categorias para criar, renomear ou excluir.\n"
         f"📘 Manual completo, passo a passo: /manual\n"
         f"🛠️ Nos planos pagos você ainda abre chamado direto com a equipe: /chamado"
     )
@@ -377,18 +391,24 @@ def _msg_bloqueio(verdict) -> list:
         limite = verdict.meta.get("limite", LIMITE_DIAS_RELATORIO_FREE)
         return [_menu_planos(f"⛔ No plano Grátis os relatórios cobrem até {limite} dias.\n\n"
                              "🚀 Faça o upgrade para relatórios de qualquer período:")]
+    if verdict.motivo == MOTIVO_LIMITE_CATEGORIAS:
+        limite = verdict.meta.get("limite", LIMITE_CATEGORIAS_FREE)
+        return [_menu_planos(f"⛔ No plano Grátis dá para criar até {limite} categorias próprias.\n"
+                             "Você ainda pode renomear ou excluir as que já tem (/categorias).\n\n"
+                             "🚀 Faça o upgrade para criar quantas quiser:")]
     if verdict.motivo == MOTIVO_SO_PAGO:
         return [_menu_planos("⛔ Abrir chamado é um benefício dos planos pagos.\n\n"
                              "🚀 Faça o upgrade para falar direto com a equipe:")]
     return [_menu_planos("⛔ Este recurso é exclusivo dos planos pagos. Faça o upgrade:")]
 
-def _gate(user_row, acao, contexto, *, lancamentos_mes=0, periodo_dias=0):
+def _gate(user_row, acao, contexto, *, lancamentos_mes=0, periodo_dias=0, categorias_proprias=0):
     """
     Aplica o check_access. Devolve None se pode seguir; ou a LISTA de respostas
     do bloqueio se deve parar. Com PAYWALL_ENABLED desligado (sombra), NUNCA
     bloqueia: apenas registra no log o que teria bloqueado e devolve None.
     """
-    verdict = check_access(user_row, acao, lancamentos_mes=lancamentos_mes, periodo_dias=periodo_dias)
+    verdict = check_access(user_row, acao, lancamentos_mes=lancamentos_mes, periodo_dias=periodo_dias,
+                           categorias_proprias=categorias_proprias)
     if verdict.liberado:
         return None
     if paywall_ativo():
@@ -556,6 +576,8 @@ def tratar_clique_lancamento(data: str, telegram_id: int, first_name: str) -> li
             salvar_rascunho_chamado(user_id, None)
             aviso = ["ℹ️ Cancelei o chamado que estava pela metade. "
                      "Depois é só mandar /chamado de novo."]
+        if row.get("categoria_etapa"):
+            salvar_etapa_categoria(user_id, None)
         salvar_edicao(user_id, gasto_id)
         return aviso + [("✏️ Me mande o lançamento corrigido, do jeito que você registraria. "
                  "Inclua a data se não for hoje, ex.:\n"
@@ -623,6 +645,225 @@ def _aplicar_edicao(user_row, dados: dict) -> list:
             f"\n\nAntes era:\n{_detalhe_lancamento(antes)}"]
 
 
+# --- Categorias personalizadas ------------------------------------------------
+# callback_data dos botões (limite do Telegram: 64 bytes):
+#   c|lista        mostra as categorias de novo
+#   c|nova         começa a criar (a próxima mensagem é o nome)
+#   c|ver|<id>     detalhe + botões Renomear/Excluir
+#   c|ren|<id>     começa a renomear (a próxima mensagem é o nome novo)
+#   c|del|<id>     pede confirmação da exclusão
+#   c|delok|<id>   exclui de fato (lançamentos vão para "Outros")
+CATEGORIA_EXPIRA_MIN = 30
+# Teto para todos os planos: cada categoria é um botão na tela e um nome a mais
+# no prompt da IA (custo de token em TODA mensagem).
+LIMITE_TOTAL_CATEGORIAS = 30
+TAMANHO_NOME_CATEGORIA = (2, 30)
+
+
+def _chave_categoria(nome) -> str:
+    return " ".join(str(nome or "").split()).casefold()
+
+
+def _eh_reserva(cat: dict) -> bool:
+    return _chave_categoria(cat["nome"]) == _chave_categoria(CATEGORIA_RESERVA)
+
+
+def _categoria_da_lista(nome, categorias: list) -> str:
+    """
+    Garante que a categoria gravada é uma da lista do usuário, escrita como na
+    lista. O prompt pede isso à IA, mas quem garante é o código: um nome
+    inventado vira "Outros", em vez de criar mais uma categoria solta.
+    """
+    por_chave = {_chave_categoria(c): c for c in categorias}
+    exata = por_chave.get(_chave_categoria(nome))
+    if exata:
+        return exata
+    # Erro de digitação da IA ("Pets Test" para "Pets Teste"): aceita só o que
+    # é MUITO parecido; o resto vai para a reserva em vez de virar categoria nova.
+    parecida = difflib.get_close_matches(_chave_categoria(nome), list(por_chave), n=1, cutoff=0.85)
+    if parecida:
+        return por_chave[parecida[0]]
+    return por_chave.get(_chave_categoria(CATEGORIA_RESERVA), CATEGORIA_RESERVA)
+
+
+def _interpretar(text: str, user_id: int) -> dict:
+    """Chama a IA com as categorias do usuário e normaliza a categoria escolhida."""
+    try:
+        categorias = [c["nome"] for c in listar_categorias(user_id)]
+    except Exception as e:
+        # Categoria é organização, não pode derrubar o registro: sem a lista,
+        # a IA usa a padrão e a categoria passa sem normalizar.
+        logging.error(f"falha ao listar categorias do usuário {user_id}: {e}")
+        categorias = None
+    dados = extract_transaction(text, categorias)
+    t = dados.get("transacao")
+    if categorias and isinstance(t, dict):
+        escolhida = _categoria_da_lista(t.get("categoria"), categorias)
+        # A confirmação ao usuário é escrita pela IA e cita a categoria DELA. Se
+        # o código trocou a categoria, aquela mensagem mentiria sobre o que foi
+        # gravado — então quem registra monta a confirmação (ver "registrar").
+        if escolhida != t.get("categoria"):
+            dados["categoria_corrigida"] = True
+        t["categoria"] = escolhida
+    return dados
+
+
+def _etapa_categoria_ativa(user_row) -> bool:
+    if not user_row.get("categoria_etapa"):
+        return False
+    return _dentro_do_prazo(user_row.get("categoria_iniciada_em"), CATEGORIA_EXPIRA_MIN)
+
+
+def _lista_categorias(user_id: int, mensagem: str = None) -> list:
+    categorias = listar_categorias(user_id)
+    botoes = [{"texto": c["nome"], "dados": f"c|ver|{c['id']}"} for c in categorias]
+    linhas = [botoes[i:i + 2] for i in range(0, len(botoes), 2)]  # 2 por linha
+    linhas.append([{"texto": "➕ Nova categoria", "dados": "c|nova"}])
+    return [{"tipo": "botoes",
+             "mensagem": mensagem or (f"🏷️ Suas categorias ({len(categorias)}).\n"
+                                      "Toque numa para renomear ou excluir, ou crie uma nova 👇"),
+             "botoes": linhas}]
+
+
+def _abrir_conversa_categoria(row, etapa: str) -> list:
+    """Começa a esperar o nome. Desfaz edição/chamado pela metade, avisando."""
+    aviso = []
+    if _rascunho_ativo(row):
+        salvar_rascunho_chamado(row["id"], None)
+        aviso.append("ℹ️ Cancelei o chamado que estava pela metade. "
+                     "Depois é só mandar /chamado de novo.")
+    if row.get("edicao_gasto_id"):
+        salvar_edicao(row["id"], None)
+    salvar_etapa_categoria(row["id"], etapa)
+    return aviso
+
+
+def tratar_clique_categoria(data: str, telegram_id: int, first_name: str) -> list:
+    """Clique num dos botões c|... (ver acima). Devolve a lista de respostas."""
+    partes = data.split("|")
+    acao = partes[1] if len(partes) > 1 else ""
+    row = get_or_create_user_row(telegram_id, first_name)
+    user_id = row["id"]
+
+    if acao == "lista":
+        return _lista_categorias(user_id)
+
+    if acao == "nova":
+        if len(listar_categorias(user_id)) >= LIMITE_TOTAL_CATEGORIAS:
+            return [f"Você já tem {LIMITE_TOTAL_CATEGORIAS} categorias, o máximo. "
+                    "Exclua ou junte algumas antes de criar outra (/categorias)."]
+        bloqueio = _gate(row, ACAO_CRIAR_CATEGORIA, "criar-categoria",
+                         categorias_proprias=contar_categorias_proprias(user_id))
+        if bloqueio:
+            return bloqueio
+        aviso = _abrir_conversa_categoria(row, "nova")
+        return aviso + ["🏷️ Qual o nome da nova categoria? (ex.: Pets, Academia, Presentes)\n\n"
+                        "(Para desistir, é só mandar /cancelar.)"]
+
+    try:
+        cat_id = int(partes[2])
+    except (IndexError, ValueError):
+        return ["Não entendi esse botão. Mande /categorias para ver a lista de novo."]
+
+    # Filtra pelo dono: id forjado de outra pessoa = "não encontrada".
+    cat = get_categoria(user_id, cat_id)
+    if cat is None:
+        return ["🤔 Não encontrei essa categoria — talvez ela já tenha sido excluída. /categorias"]
+
+    if _eh_reserva(cat) and acao in ("ver", "ren", "del", "delok"):
+        return [{"tipo": "botoes",
+                 "mensagem": (f"🏷️ {cat['nome']}\n\n"
+                              f"É a categoria reserva: recebe o que não se encaixa em nenhuma "
+                              f"outra e os lançamentos de categorias excluídas. Por isso não dá "
+                              f"para renomear nem excluir."),
+                 "botoes": [[{"texto": "⬅️ Voltar", "dados": "c|lista"}]]}]
+
+    if acao == "ver":
+        n = contar_lancamentos_categoria(user_id, cat["nome"])
+        return [{"tipo": "botoes",
+                 "mensagem": f"🏷️ {cat['nome']}\n{n} lançamento(s) nesta categoria.\n\nO que você quer fazer?",
+                 "botoes": [[{"texto": "✏️ Renomear", "dados": f"c|ren|{cat_id}"},
+                             {"texto": "🗑️ Excluir", "dados": f"c|del|{cat_id}"}],
+                            [{"texto": "⬅️ Voltar", "dados": "c|lista"}]]}]
+
+    if acao == "ren":
+        aviso = _abrir_conversa_categoria(row, f"renomear:{cat_id}")
+        return aviso + [f"✏️ Qual o novo nome para \"{cat['nome']}\"?\n"
+                        "Os lançamentos dela passam para o nome novo. Se você usar o nome de "
+                        "outra categoria que já existe, as duas viram uma só.\n\n"
+                        "(Para desistir, é só mandar /cancelar.)"]
+
+    if acao == "del":
+        n = contar_lancamentos_categoria(user_id, cat["nome"])
+        destino = f"\nOs {n} lançamento(s) dela vão para \"{CATEGORIA_RESERVA}\"." if n else ""
+        return [{"tipo": "botoes",
+                 "mensagem": f"⚠️ Excluir a categoria \"{cat['nome']}\"?{destino}",
+                 "botoes": [[{"texto": "✅ Sim, excluir", "dados": f"c|delok|{cat_id}"},
+                             {"texto": "Não", "dados": f"c|ver|{cat_id}"}]]}]
+
+    if acao == "delok":
+        movidos = excluir_categoria(user_id, cat_id)
+        if movidos is None:
+            return ["🤔 Essa categoria já não existe. /categorias"]
+        extra = f" {movidos} lançamento(s) foram para \"{CATEGORIA_RESERVA}\"." if movidos else ""
+        return _lista_categorias(user_id, f"🗑️ Categoria \"{cat['nome']}\" excluída.{extra}")
+
+    return ["Não entendi esse botão. Mande /categorias para ver a lista de novo."]
+
+
+def _nome_valido(texto: str):
+    """Nome limpo, ou None se não serve (curto, longo, sem letra)."""
+    nome = " ".join(texto.split())
+    minimo, maximo = TAMANHO_NOME_CATEGORIA
+    if not (minimo <= len(nome) <= maximo) or not any(ch.isalpha() for ch in nome):
+        return None
+    return nome[0].upper() + nome[1:]  # "pets" -> "Pets", sem mexer no resto
+
+
+def _responder_nome_categoria(user_row, texto: str) -> list:
+    """A mensagem depois de "Nova categoria" / "Renomear": é o nome."""
+    user_id = user_row["id"]
+    etapa = user_row.get("categoria_etapa") or ""
+    nome = _nome_valido(texto)
+    if nome is None:
+        minimo, maximo = TAMANHO_NOME_CATEGORIA
+        return [f"Esse nome não serve 🤔 Use de {minimo} a {maximo} caracteres, com pelo menos "
+                "uma letra. Mande de novo, ou /cancelar para desistir."]
+
+    salvar_etapa_categoria(user_id, None)
+
+    if etapa == "nova":
+        # Confere o limite de novo: entre o clique e o nome, outra conversa pode
+        # ter criado uma categoria.
+        bloqueio = _gate(user_row, ACAO_CRIAR_CATEGORIA, "criar-categoria",
+                         categorias_proprias=contar_categorias_proprias(user_id))
+        if bloqueio:
+            return bloqueio
+        if criar_categoria(user_id, nome) is None:
+            return _lista_categorias(user_id, f"Você já tem a categoria \"{nome}\". 🙂")
+        return _lista_categorias(user_id, f"✅ Categoria \"{nome}\" criada! A partir de agora "
+                                          f"eu uso ela nos seus lançamentos quando fizer sentido.")
+
+    if etapa.startswith("renomear:"):
+        try:
+            cat_id = int(etapa.split(":", 1)[1])
+        except ValueError:
+            return ["Não consegui identificar a categoria. Mande /categorias e tente de novo."]
+        antiga = get_categoria(user_id, cat_id)
+        resultado, movidos = renomear_categoria(user_id, cat_id, nome)
+        if resultado == "nao_encontrada" or antiga is None:
+            return ["🤔 Essa categoria já não existe. /categorias"]
+        if resultado == "mesmo_nome":
+            return _lista_categorias(user_id, "O nome é o mesmo, nada mudou. 🙂")
+        extra = f" ({movidos} lançamento(s) atualizados)" if movidos else ""
+        if resultado == "juntada":
+            return _lista_categorias(user_id, f"🔗 \"{antiga['nome']}\" foi juntada com "
+                                              f"\"{nome}\"{extra}.")
+        return _lista_categorias(user_id, f"✅ \"{antiga['nome']}\" agora se chama \"{nome}\"{extra}.")
+
+    return ["Não consegui identificar o que você estava fazendo. Mande /categorias de novo."]
+
+
 def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dict = None) -> list:
     """
     Roteia uma mensagem do usuário e retorna a lista de respostas (strings ou objetos de controle) a enviar.
@@ -654,7 +895,7 @@ def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dic
         # (_dados_ia presente = a edição já foi encerrada nesta mesma mensagem.)
         if _dados_ia is None and _edicao_ativa(user_row):
             if not texto.startswith("/"):
-                dados = extract_transaction(text)
+                dados = _interpretar(text, internal_id)
                 if dados.get("acao") == "registrar":
                     return _aplicar_edicao(user_row, dados)
                 if dados.get("acao") == "pedir_dados":
@@ -668,6 +909,16 @@ def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dic
             salvar_edicao(internal_id, None)
             if comando.startswith("/cancelar"):
                 return ["Beleza, edição cancelada. O lançamento continua como estava. 👍"]
+
+        # --- Nome de categoria pendente ----------------------------------------
+        # Depois de "Nova categoria" ou "Renomear", a próxima mensagem é o nome.
+        # Mesmo tratamento da edição: um comando no meio desiste e segue.
+        if _etapa_categoria_ativa(user_row):
+            if not texto.startswith("/"):
+                return _responder_nome_categoria(user_row, texto)
+            salvar_etapa_categoria(internal_id, None)
+            if comando.startswith("/cancelar"):
+                return ["Beleza, cancelei. Suas categorias continuam como estavam. 👍"]
 
         # --- /chamado: conversa de 2 perguntas --------------------------------
         # Vem antes de todo o resto porque, enquanto o rascunho está aberto, a
@@ -730,8 +981,11 @@ def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dic
         if comando.startswith("/manual"):
             return resposta_manual()
 
+        if comando.startswith("/categorias"):
+            return _lista_categorias(internal_id)
+
         # Camada 2 (IA): interpreta a intenção
-        dados = _dados_ia or extract_transaction(text)
+        dados = _dados_ia or _interpretar(text, internal_id)
         acao = dados.get("acao")
 
         if acao in ["conversar", "pedir_dados", "pedir_periodo"]:
@@ -756,9 +1010,12 @@ def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dic
                 descricao=transacao.get("descricao"),
                 data=transacao.get("data"),
             )
-            if sucesso:
-                return [dados.get("mensagem", "Registrado com sucesso!")]
-            return ["Falha ao salvar no banco de dados."]
+            if not sucesso:
+                return ["Falha ao salvar no banco de dados."]
+            if dados.get("categoria_corrigida"):
+                return [f"Registrei sua transação ✅\n\n{_detalhe_lancamento(transacao)}\n\n"
+                        "Quer registrar mais alguma coisa ou ver um relatório?"]
+            return [dados.get("mensagem", "Registrado com sucesso!")]
 
         elif acao == "relatorio":
             periodo = dados.get("periodo", {})

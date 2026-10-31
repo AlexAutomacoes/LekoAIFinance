@@ -340,6 +340,12 @@ class handler(BaseHTTPRequestHandler):
                     enviar_respostas(chat_id, tratar_clique_lancamento(
                         data, user.get("id", chat_id), user.get("first_name", "")))
 
+                # Categorias personalizadas (ver message_handler.tratar_clique_categoria)
+                if data.startswith("c|") and chat_id:
+                    from tools.message_handler import tratar_clique_categoria
+                    enviar_respostas(chat_id, tratar_clique_categoria(
+                        data, user.get("id", chat_id), user.get("first_name", "")))
+
                 self._reply(200, "ok")
                 return
 
