@@ -17,17 +17,20 @@ from datetime import datetime, timezone
 # --- Regras do plano free ---------------------------------------------------
 LIMITE_LANCAMENTOS_FREE = 20      # lançamentos por mês no free
 LIMITE_DIAS_RELATORIO_FREE = 7    # janela máxima de relatório no free
+LIMITE_CATEGORIAS_FREE = 3        # categorias CRIADAS pelo usuário no free (a lista inicial não conta)
 
 # --- Ações que passam pelo gate ---------------------------------------------
 ACAO_REGISTRAR = "registrar"
 ACAO_RELATORIO = "relatorio"
 ACAO_CHAMADO = "chamado"      # abrir chamado é benefício de plano pago
+ACAO_CRIAR_CATEGORIA = "criar_categoria"
 
 # --- Motivos de bloqueio (o paywall usa pra escolher a mensagem) ------------
 MOTIVO_COTA = "cota_estourada"
 MOTIVO_PERIODO = "periodo_longo"
 MOTIVO_EXPIRADO = "plano_expirado"
 MOTIVO_SO_PAGO = "exclusivo_pago"   # o free não tem cota nenhuma, é fechado
+MOTIVO_LIMITE_CATEGORIAS = "limite_categorias"
 
 
 @dataclass
@@ -78,6 +81,7 @@ def check_access(
     *,
     lancamentos_mes: int = 0,
     periodo_dias: int = 0,
+    categorias_proprias: int = 0,
     agora: datetime | None = None,
 ) -> Verdict:
     """
@@ -91,6 +95,7 @@ def check_access(
       5. free/registrar   -> liberado se lançamentos do mês < 20
          free/relatorio   -> liberado se período <= 7 dias
          free/chamado     -> BLOQUEADO sempre (não há cota: é só dos pagos)
+         free/criar_categoria -> liberado se criou menos de 3
       6. senão            -> BLOQUEADO com o motivo
     """
     agora = agora or datetime.now(timezone.utc)
@@ -126,6 +131,11 @@ def check_access(
         return Verdict(periodo_dias <= LIMITE_DIAS_RELATORIO_FREE,
                        None if periodo_dias <= LIMITE_DIAS_RELATORIO_FREE else MOTIVO_PERIODO,
                        meta=meta)
+
+    if acao == ACAO_CRIAR_CATEGORIA:
+        meta = {"usadas": categorias_proprias, "limite": LIMITE_CATEGORIAS_FREE}
+        livre = categorias_proprias < LIMITE_CATEGORIAS_FREE
+        return Verdict(livre, None if livre else MOTIVO_LIMITE_CATEGORIAS, meta=meta)
 
     # Abrir chamado é canal de suporte dos planos pagos. Diferente das outras
     # duas ações, não tem cota no free: quem chega aqui já não é admin, nem

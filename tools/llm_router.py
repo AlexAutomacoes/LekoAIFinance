@@ -6,6 +6,8 @@ from groq import Groq
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from tools.db_manager import CATEGORIAS_PADRAO
+
 load_dotenv()
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
@@ -20,13 +22,18 @@ def _get_client():
         raise Exception("GROQ_API_KEY não configurada no .env")
     return Groq(api_key=GROQ_API_KEY)
 
-def extract_transaction(text: str) -> dict:
+def extract_transaction(text: str, categorias: list | None = None) -> dict:
     """
     Usa a API do Groq (Llama-3.3) para converter a linguagem natural em um JSON estruturado.
     Suporta 6 ações: conversar, pedir_dados, registrar, pedir_periodo, relatorio, gerenciar.
     """
     client = _get_client()
     hoje = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m-%d")
+    # As categorias do usuário entram no prompt para a IA escolher UMA delas, em
+    # vez de inventar um nome a cada mensagem (era assim que surgiam "Roupas" e
+    # "Vestuário" para a mesma coisa). Quem garante a escolha é o código
+    # (message_handler._categoria_da_lista); o prompt só aumenta o acerto.
+    lista_categorias = ", ".join(categorias or CATEGORIAS_PADRAO)
     
     system_prompt = f"""Você é o LekoAIFinance, um assistente de FINANÇAS PESSOAIS que conversa com o usuário pelo Telegram.
 Sua missão é ajudar a registrar entradas e saídas de dinheiro, gerar relatórios e dar orientações gerais de educação financeira — sempre de forma clara, organizada e acolhedora.
@@ -44,7 +51,8 @@ Você NUNCA responde em texto livre: sua saída é SEMPRE um único objeto JSON 
 - Registre APENAS o que o usuário informou. Nunca invente valor, tipo (entrada/saída), categoria, descrição ou data.
 - Se faltar o VALOR, ou não der para saber com certeza se é entrada ou saída, use "pedir_dados". Nunca presuma.
 - Nesta etapa você NÃO tem acesso ao histórico nem ao saldo do usuário. Portanto nunca afirme saldos, totais ou transações passadas. Se perguntarem algo como "quanto gastei?", trate como pedido de relatório ("pedir_periodo" ou "relatorio").
-- A categoria pode ser inferida da descrição de forma conservadora (ex.: "mercado" → Alimentação; "uber" → Transporte). Sem base clara, use "Outros".
+- A categoria é SEMPRE uma destas, escrita exatamente assim: {lista_categorias}. Escolha a que melhor combina com a descrição (ex.: "mercado" → Alimentação; "uber" → Transporte). Sem base clara, use "Outros". Nunca invente categoria fora da lista.
+- Se o usuário quiser criar, renomear ou excluir CATEGORIAS, use "conversar" e explique que é pelo comando /categorias.
 
 ==================== ESTILO DAS MENSAGENS (campo "mensagem") ====================
 - Português do Brasil, tom cordial, próximo e profissional. Nunca robótico nem infantil.
@@ -79,7 +87,7 @@ Na "mensagem", confirme de forma organizada: exiba o valor em reais (ex.: R$ 50,
   "transacao": {{
       "status": "Saída" ou "Entrada",
       "valor": float (negativo para Saída, positivo para Entrada),
-      "categoria": "string (ex.: Alimentação, Transporte, Moradia, Salário, Lazer, Saúde, Outros)",
+      "categoria": "string (uma das categorias da lista acima)",
       "descricao": "string (breve)",
       "data": "YYYY-MM-DD"
   }}

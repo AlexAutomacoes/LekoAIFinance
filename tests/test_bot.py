@@ -37,7 +37,8 @@ def usuario(**extra):
     row = {"id": 7, "telegram_id": TG, "name": "Ana", "plan_type": "free",
            "subscription_expires_at": None, "plano_escolhido_em": AGORA.isoformat(),
            "chamado_etapa": None, "chamado_problema": None, "chamado_iniciado_em": None,
-           "edicao_gasto_id": None, "edicao_iniciada_em": None}
+           "edicao_gasto_id": None, "edicao_iniciada_em": None,
+           "categoria_etapa": None, "categoria_iniciada_em": None}
     row.update(extra)
     return row
 
@@ -48,6 +49,12 @@ GASTO = {"id": 42, "status": "Saída", "valor": -50.0, "categoria": "Alimentaç�
 REGISTRO = {"acao": "registrar", "mensagem": "Registrei sua transação ✅",
             "transacao": {"status": "Saída", "valor": -45.5, "categoria": "Alimentação",
                           "descricao": "mercado", "data": "2026-10-29"}}
+
+
+CATEGORIAS = [{"id": 1, "nome": "Alimentação", "padrao": True},
+              {"id": 2, "nome": "Lazer", "padrao": True},
+              {"id": 3, "nome": "Outros", "padrao": True},
+              {"id": 4, "nome": "Pets", "padrao": False}]
 
 
 class BaseBot(unittest.TestCase):
@@ -72,6 +79,14 @@ class BaseBot(unittest.TestCase):
             "get_transactions": [],
             "generate_financial_tips": "dica",
             "vincular_telegram": None,
+            "listar_categorias": CATEGORIAS,
+            "get_categoria": CATEGORIAS[0],
+            "contar_categorias_proprias": 0,
+            "contar_lancamentos_categoria": 4,
+            "criar_categoria": {"id": 99, "nome": "Pets", "padrao": False},
+            "renomear_categoria": ("renomeada", 4),
+            "excluir_categoria": 4,
+            "salvar_etapa_categoria": None,
         }.items():
             pat = mock.patch(alvo + nome, return_value=valor)
             self.p[nome] = pat.start()
@@ -423,6 +438,231 @@ class TestEdicao(BaseBot):
         self.msg("gastei 45,50 no mercado")
         self.p["atualizar_lancamento"].assert_called_once()
 
+
+# ---------------------------------------------------------------------------
+# Novo: categorias personalizadas
+# ---------------------------------------------------------------------------
+class TestCategoriasNaIA(BaseBot):
+
+    def test_ia_recebe_a_lista_do_usuario(self):
+        self.ia(REGISTRO)
+        self.msg("gastei 45,50 no mercado")
+        args = self.p["extract_transaction"].call_args
+        self.assertEqual(args.args[1], ["Alimentação", "Lazer", "Outros", "Pets"])
+
+    def test_categoria_inventada_pela_ia_vira_outros(self):
+        self.ia({**REGISTRO, "transacao": {**REGISTRO["transacao"], "categoria": "Supermercado"}})
+        self.msg("gastei 45,50 no mercado")
+        self.assertEqual(self.p["insert_transaction"].call_args.kwargs["categoria"], "Outros")
+
+    def test_erro_de_digitacao_da_ia_acha_a_categoria_certa(self):
+        # caso real visto no teste com a Groq: "Pets Test" para "Pets Teste"
+        self.p["listar_categorias"].return_value = CATEGORIAS + [
+            {"id": 5, "nome": "Pets Teste", "padrao": False}]
+        self.ia({**REGISTRO, "transacao": {**REGISTRO["transacao"], "categoria": "Pets Test"}})
+        r = self.msg("ração 80")
+        self.assertEqual(self.p["insert_transaction"].call_args.kwargs["categoria"], "Pets Teste")
+        # a confirmação mostra o que foi GRAVADO, não o que a IA escreveu
+        self.assertIn("Categoria: Pets Teste", r[0])
+
+    def test_confirmacao_bate_com_o_gravado_quando_vai_para_outros(self):
+        self.ia({**REGISTRO, "mensagem": "Registrei ✅ • Categoria: Supermercado",
+                 "transacao": {**REGISTRO["transacao"], "categoria": "Supermercado"}})
+        r = self.msg("gastei 45,50 no mercado")
+        self.assertIn("Categoria: Outros", r[0])
+        self.assertNotIn("Supermercado", r[0])
+
+    def test_categoria_ja_certa_mantem_a_mensagem_da_ia(self):
+        self.ia(REGISTRO)  # categoria "Alimentação", que está na lista
+        self.assertEqual(self.msg("gastei 45,50 no mercado"), ["Registrei sua transação ✅"])
+
+    def test_categoria_com_caixa_diferente_vira_a_da_lista(self):
+        self.ia({**REGISTRO, "transacao": {**REGISTRO["transacao"], "categoria": "  pets "}})
+        self.msg("ração 80")
+        self.assertEqual(self.p["insert_transaction"].call_args.kwargs["categoria"], "Pets")
+
+    def test_correcao_tambem_usa_a_lista(self):
+        self.row = usuario(edicao_gasto_id=42, edicao_iniciada_em=AGORA.isoformat())
+        self.ia({**REGISTRO, "transacao": {**REGISTRO["transacao"], "categoria": "Inventada"}})
+        self.msg("gastei 45,50 no mercado")
+        self.assertEqual(self.p["atualizar_lancamento"].call_args.kwargs["categoria"], "Outros")
+
+    def test_falha_ao_ler_categorias_nao_derruba_o_registro(self):
+        self.p["listar_categorias"].side_effect = RuntimeError("banco fora")
+        self.ia(REGISTRO)
+        r = self.msg("gastei 45,50 no mercado")
+        self.assertEqual(r, ["Registrei sua transação ✅"])
+        self.assertIsNone(self.p["extract_transaction"].call_args.args[1])
+
+
+class TestTelaDeCategorias(BaseBot):
+
+    def clique(self, dados):
+        return mh.tratar_clique_categoria(dados, TG, "Ana")
+
+    def test_comando_lista_em_botoes(self):
+        r = self.msg("/categorias")
+        self.assertEqual(r[0]["tipo"], "botoes")
+        linhas = r[0]["botoes"]
+        self.assertEqual(linhas[0], [{"texto": "Alimentação", "dados": "c|ver|1"},
+                                     {"texto": "Lazer", "dados": "c|ver|2"}])
+        self.assertEqual(linhas[-1], [{"texto": "➕ Nova categoria", "dados": "c|nova"}])
+        self.p["extract_transaction"].assert_not_called()
+
+    def test_callback_data_cabe_no_limite_do_telegram(self):
+        self.p["listar_categorias"].return_value = [{"id": 2**62, "nome": "X" * 30, "padrao": False}]
+        for linha in self.msg("/categorias")[0]["botoes"]:
+            for b in linha:
+                self.assertLessEqual(len(b["dados"].encode()), 64)
+
+    def test_ver_categoria(self):
+        r = self.clique("c|ver|1")
+        self.assertIn("4 lançamento", r[0]["mensagem"])
+        dados = [b["dados"] for l in r[0]["botoes"] for b in l]
+        self.assertEqual(dados, ["c|ren|1", "c|del|1", "c|lista"])
+
+    def test_outros_nao_pode_renomear_nem_excluir(self):
+        self.p["get_categoria"].return_value = CATEGORIAS[2]
+        for acao in ("ver", "ren", "del", "delok"):
+            r = self.clique(f"c|{acao}|3")
+            self.assertIn("reserva", r[0]["mensagem"], acao)
+        self.p["excluir_categoria"].assert_not_called()
+        self.p["salvar_etapa_categoria"].assert_not_called()
+
+    def test_excluir_pede_confirmacao_e_avisa_destino(self):
+        r = self.clique("c|del|1")
+        self.assertIn('vão para "Outros"', r[0]["mensagem"])
+        self.p["excluir_categoria"].assert_not_called()
+        r = self.clique("c|delok|1")
+        self.p["excluir_categoria"].assert_called_once_with(7, 1)
+        self.assertIn("excluída", r[0]["mensagem"])
+
+    def test_categoria_de_outra_pessoa(self):
+        self.p["get_categoria"].return_value = None
+        for acao in ("ver", "ren", "del", "delok"):
+            self.assertIn("Não encontrei", self.clique(f"c|{acao}|999")[0], acao)
+        self.p["excluir_categoria"].assert_not_called()
+        self.p["salvar_etapa_categoria"].assert_not_called()
+
+    def test_cliques_malformados(self):
+        for dados in ("c|", "c|ver", "c|ver|abc", "c|xyz|1", "c|del|"):
+            self.assertTrue(self.clique(dados), dados)
+        self.p["excluir_categoria"].assert_not_called()
+
+    def test_nova_no_gratis_dentro_do_limite(self):
+        self.p["contar_categorias_proprias"].return_value = 2
+        r = self.clique("c|nova")
+        self.p["salvar_etapa_categoria"].assert_called_once_with(7, "nova")
+        self.assertIn("nome da nova categoria", r[0])
+
+    def test_nova_no_gratis_acima_do_limite_mostra_upgrade(self):
+        self.p["contar_categorias_proprias"].return_value = 3
+        r = self.clique("c|nova")
+        self.assertEqual(r[0]["tipo"], "botoes_planos")
+        self.assertIn("até 3 categorias", r[0]["mensagem"])
+        self.p["salvar_etapa_categoria"].assert_not_called()
+
+    def test_nova_no_plano_pago_sem_limite(self):
+        self.row = usuario(plan_type="lifetime")
+        self.p["contar_categorias_proprias"].return_value = 15
+        self.clique("c|nova")
+        self.p["salvar_etapa_categoria"].assert_called_once_with(7, "nova")
+
+    def test_teto_total_vale_para_todos(self):
+        self.row = usuario(plan_type="lifetime")
+        self.p["listar_categorias"].return_value = [{"id": i, "nome": f"C{i}", "padrao": True}
+                                                    for i in range(30)]
+        r = self.clique("c|nova")
+        self.assertIn("máximo", r[0])
+        self.p["salvar_etapa_categoria"].assert_not_called()
+
+    def test_renomear_nao_tem_limite_de_plano(self):
+        self.p["contar_categorias_proprias"].return_value = 3
+        self.clique("c|ren|1")
+        self.p["salvar_etapa_categoria"].assert_called_once_with(7, "renomear:1")
+
+    def test_abrir_conversa_desfaz_edicao_e_avisa_chamado(self):
+        self.row = usuario(edicao_gasto_id=42, edicao_iniciada_em=AGORA.isoformat(),
+                           chamado_etapa="problema", chamado_iniciado_em=AGORA.isoformat())
+        r = self.clique("c|ren|1")
+        self.p["salvar_edicao"].assert_called_once_with(7, None)
+        self.p["salvar_rascunho_chamado"].assert_called_once_with(7, None)
+        self.assertIn("Cancelei o chamado", r[0])
+
+    def test_editar_lancamento_desfaz_nome_de_categoria_pendente(self):
+        self.row = usuario(categoria_etapa="nova", categoria_iniciada_em=AGORA.isoformat())
+        mh.tratar_clique_lancamento("g|edit|42", TG, "Ana")
+        self.p["salvar_etapa_categoria"].assert_called_once_with(7, None)
+
+
+class TestNomeDeCategoria(BaseBot):
+
+    def etapa(self, etapa, minutos_atras=0):
+        self.row = usuario(categoria_etapa=etapa,
+                           categoria_iniciada_em=(AGORA - timedelta(minutes=minutos_atras)).isoformat())
+
+    def test_criar(self):
+        self.etapa("nova")
+        r = self.msg("  pets  ")
+        self.p["criar_categoria"].assert_called_once_with(7, "Pets")
+        self.p["salvar_etapa_categoria"].assert_called_once_with(7, None)
+        self.assertIn("criada", r[0]["mensagem"])
+        self.p["extract_transaction"].assert_not_called()  # o nome não vai para a IA
+
+    def test_criar_duplicada(self):
+        self.etapa("nova")
+        self.p["criar_categoria"].return_value = None
+        self.assertIn("já tem", self.msg("Lazer")[0]["mensagem"])
+
+    def test_limite_conferido_de_novo_ao_receber_o_nome(self):
+        self.etapa("nova")
+        self.p["contar_categorias_proprias"].return_value = 3
+        r = self.msg("Academia")
+        self.assertEqual(r[0]["tipo"], "botoes_planos")
+        self.p["criar_categoria"].assert_not_called()
+
+    def test_nome_invalido_pede_de_novo_e_segue_esperando(self):
+        self.etapa("nova")
+        for ruim in ("a", "12345", "x" * 31, "!!"):
+            self.assertIn("não serve", self.msg(ruim)[0], ruim)
+        self.p["criar_categoria"].assert_not_called()
+        self.p["salvar_etapa_categoria"].assert_not_called()
+
+    def test_renomear(self):
+        self.etapa("renomear:1")
+        r = self.msg("Comida")
+        self.p["renomear_categoria"].assert_called_once_with(7, 1, "Comida")
+        self.assertIn('agora se chama "Comida"', r[0]["mensagem"])
+        self.assertIn("4 lançamento", r[0]["mensagem"])
+
+    def test_renomear_juntando(self):
+        self.etapa("renomear:1")
+        self.p["renomear_categoria"].return_value = ("juntada", 2)
+        self.assertIn("juntada", self.msg("Lazer")[0]["mensagem"])
+
+    def test_cancelar(self):
+        self.etapa("renomear:1")
+        r = self.msg("/cancelar")
+        self.assertIn("cancelei", r[0])
+        self.p["renomear_categoria"].assert_not_called()
+
+    def test_outro_comando_desiste_e_roda(self):
+        self.etapa("nova")
+        r = self.msg("/plano")
+        self.p["salvar_etapa_categoria"].assert_called_once_with(7, None)
+        self.p["criar_categoria"].assert_not_called()
+        self.assertIn("Seu plano", r[0])
+
+    def test_etapa_expirada_vira_mensagem_normal(self):
+        self.etapa("nova", minutos_atras=31)
+        self.ia(REGISTRO)
+        self.msg("gastei 45,50 no mercado")
+        self.p["criar_categoria"].assert_not_called()
+        self.p["insert_transaction"].assert_called_once()
+
+    def test_etapa_corrompida(self):
+        self.etapa("renomear:abc")
+        self.assertIn("Não consegui", self.msg("Comida")[0])
 
 # ---------------------------------------------------------------------------
 # Novo: manual em PDF
