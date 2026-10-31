@@ -11,6 +11,8 @@ Tabela Supabase: "chamados".
 import os
 import logging
 import secrets
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 
 import httpx
@@ -374,12 +376,70 @@ def patch(headers, body: dict):
 
     try:
         result = _client().table("chamados").update(updates).eq("id", chamado_id).execute()
-        if result.data:
-            return 200, result.data[0]
-        return 404, {"error": "Chamado nao encontrado"}
+        if not result.data:
+            return 404, {"error": "Chamado nao encontrado"}
+        chamado = result.data[0]
+        # Só o dashboard pede o aviso (`notificar_cliente`), e só ao fechar. O N1
+        # automático NÃO pede: ele já manda a própria mensagem ao cliente, e um
+        # aviso aqui faria o cliente receber duas.
+        if body.get("notificar_cliente") and updates.get("status") == "resolvido":
+            # O resultado volta para o dashboard: se o Telegram falhar, quem
+            # resolveu fica sabendo na hora, em vez de o cliente ficar sem resposta
+            # calado (foi exatamente o que aconteceu com os chamados do Felipe).
+            chamado = {**chamado, "cliente_notificado": avisar_cliente_resolvido(chamado)}
+        return 200, chamado
     except Exception as e:
         logging.error(f"chamados patch error: {e}", exc_info=True)
         return 500, {"error": str(e)}
+
+
+def _cliente_do_chamado(chamado: dict):
+    """
+    (telegram_id, nome) de quem abriu, a partir do test_name 'telegram:<id> (Nome)'.
+    (None, None) se o chamado não veio de um cliente (ex.: aberto pelo CI).
+    Mesma regra do tools/suporte_n1_triagem.py, que roda fora deste módulo.
+    """
+    tn = (chamado.get("test_name") or "").strip()
+    if not tn.startswith("telegram:"):
+        return None, None
+    resto = tn[len("telegram:"):].strip()
+    num = resto.split()[0] if resto else ""
+    nome = None
+    if "(" in resto and resto.endswith(")"):
+        nome = resto[resto.index("(") + 1:-1].strip() or None
+    return (int(num) if num.isdigit() else None), nome
+
+
+def mensagem_resolvido(chamado: dict, nome) -> str:
+    """Texto que o cliente recebe. Mesmo formato das respostas do N1 automático."""
+    corpo = f"Referente ao seu chamado aberto nº{chamado.get('id')}, o mesmo já foi resolvido."
+    nota = (chamado.get("resolution_note") or "").strip()
+    if nota:
+        corpo += f"\n\n{nota}"
+    return f"Saudações{' ' + nome if nome else ''}!\n\n{corpo}\n\nLekoAI Finance\nAtenciosamente"
+
+
+def avisar_cliente_resolvido(chamado: dict) -> bool:
+    """
+    Manda ao cliente, no Telegram, que o chamado foi resolvido (com a nota).
+    Devolve True só se o Telegram confirmou; chamado sem cliente devolve False.
+    """
+    telegram_id, nome = _cliente_do_chamado(chamado)
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if telegram_id is None or not token:
+        return False
+    # urllib e não httpx: o httpx registra a URL de toda requisição no log INFO,
+    # e a URL da API do Telegram carrega o token do bot.
+    payload = urllib.parse.urlencode(
+        {"chat_id": telegram_id, "text": mensagem_resolvido(chamado, nome)}).encode("utf-8")
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage", data=payload), timeout=15)
+        return True  # urlopen levanta exceção em qualquer resposta que não seja 2xx
+    except Exception as e:  # noqa: BLE001
+        # Sem a URL no log: ela carrega o token do bot.
+        logging.error(f"falha ao avisar o cliente do chamado {chamado.get('id')}: {type(e).__name__}")
+        return False
 
 
 def delete(headers, body: dict):

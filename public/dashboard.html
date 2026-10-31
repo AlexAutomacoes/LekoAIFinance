@@ -687,16 +687,33 @@
     // ---------- acoes ----------
     async function mudarStatus(id, status) {
       const payload = { _method: 'PATCH', id: id, status: status };
+      const c = cache.find(x => Number(x.id) === id);
+      const doCliente = !!c && autor(c).cliente;
       // So pede nota ao FECHAR: e o momento em que a nota tem valor (fica no
       // historico). Pedir a cada clique de "atender" so atrapalharia.
       if (status === 'resolvido') {
-        const nota = prompt('Nota de resolução (opcional):');
+        // Chamado de cliente: a nota VAI para o Telegram dele, entao o texto do
+        // prompt deixa isso claro (antes a nota ficava so no banco e o cliente
+        // nunca recebia a resposta).
+        const nota = prompt(doCliente
+          ? 'Resposta ao cliente — vai para o Telegram dele junto com o aviso de resolvido:'
+          : 'Nota de resolução (opcional):');
         if (nota === null) return;          // cancelou: nao altera nada
         if (nota) payload.resolution_note = nota;
+        if (doCliente) payload.notificar_cliente = true;
       }
       try {
-        await apiWrite(payload);
-        showToast(`Chamado #${id} → ${status}`);
+        const res = await apiWrite(payload);
+        if (payload.notificar_cliente) {
+          // Falha no Telegram nao desfaz o "resolvido", mas tem que aparecer:
+          // senao o cliente fica sem resposta e ninguem fica sabendo.
+          showToast(res && res.cliente_notificado
+            ? `Chamado #${id} resolvido — cliente avisado no Telegram ✓`
+            : `Chamado #${id} resolvido, mas NÃO consegui avisar o cliente no Telegram`,
+            res && res.cliente_notificado ? undefined : 12000);
+        } else {
+          showToast(`Chamado #${id} → ${status}`);
+        }
         fecharDetalhe(); refresh();
       } catch (e) { showToast('Erro: ' + e.message, 9000); }
     }
