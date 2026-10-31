@@ -291,7 +291,10 @@ def _ativar(chave, external_id, plan_type, email, evento, fim_periodo=None, reno
     notificar = {"telegram_id": tg,
                  "texto": ("🔄 Renovação confirmada! Seu plano continua ativo. Obrigado! 🎉"
                            if renovacao else
-                           "✅ Pagamento confirmado! Seu plano foi ativado. Obrigado! 🎉")}
+                           "✅ Pagamento confirmado! Seu plano foi ativado. Obrigado! 🎉"),
+                 # O manual vai na ativação, não na renovação: o assinante do
+                 # mensal receberia o mesmo PDF todo mês.
+                 "manual": not renovacao}
     return 200, {"ativado": True, "plan_type": plan_type}, notificar
 
 

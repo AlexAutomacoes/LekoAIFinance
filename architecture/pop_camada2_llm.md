@@ -20,7 +20,7 @@ interpretação — toda persistência é determinística (Camada 3).
 
 - **JSON Mode** (`response_format={"type": "json_object"}`) + `temperature=0.0` →
   saída determinística e sempre parseável.
-- O system prompt injeta a data de hoje e define **5 ações** possíveis:
+- O system prompt injeta a data de hoje e define **6 ações** possíveis (a 6ª, `gerenciar`, só mostra a lista de lançamentos para editar/excluir):
 
 | `acao` | Quando |
 |--------|--------|

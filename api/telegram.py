@@ -120,6 +120,23 @@ def send_link_button(chat_id: int, text: str, label: str, url: str) -> None:
         logging.error(f"Falha ao enviar botão de link: {e}")
 
 
+def send_buttons(chat_id: int, text: str, botoes: list) -> None:
+    """
+    Botões genéricos: `botoes` é uma lista de LINHAS, cada linha uma lista de
+    {"texto", "dados"} (dados = callback_data). Usado pelo editar/excluir.
+    """
+    linhas = [[{"text": b["texto"], "callback_data": b["dados"]} for b in linha]
+              for linha in botoes]
+    payload = json.dumps({"chat_id": chat_id, "text": text,
+                          "reply_markup": {"inline_keyboard": linhas}}).encode("utf-8")
+    req = urllib.request.Request(f"{API_BASE}/sendMessage", data=payload,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=15)
+    except Exception as e:
+        logging.error(f"Falha ao enviar botões: {e}")
+
+
 def enviar_respostas(chat_id: int, respostas) -> None:
     """
     Manda ao Telegram o que a Camada 2 devolveu: texto (str) ou "control dict".
@@ -142,6 +159,8 @@ def enviar_respostas(chat_id: int, respostas) -> None:
         elif tipo == "botao_link":
             send_link_button(chat_id, resposta["mensagem"],
                              resposta["texto_botao"], resposta["url"])
+        elif tipo == "botoes":
+            send_buttons(chat_id, resposta["mensagem"], resposta["botoes"])
         else:
             logging.warning(f"Tipo de resposta desconhecido: {tipo}")
 
@@ -235,6 +254,9 @@ class handler(BaseHTTPRequestHandler):
         self._reply_json(status, corpo)          # responde rápido primeiro
         if notificar:                            # só então avisa o usuário no Telegram
             send_message(notificar["telegram_id"], notificar["texto"])
+            if notificar.get("manual"):          # 1ª ativação: manda o manual junto
+                from tools.message_handler import resposta_manual
+                enviar_respostas(notificar["telegram_id"], resposta_manual())
 
     def do_GET(self):
         if self._is_chamados():
@@ -311,6 +333,12 @@ class handler(BaseHTTPRequestHandler):
                 if data == "free|aguardar" and chat_id:
                     from tools.message_handler import aguardar_proximo_mes
                     enviar_respostas(chat_id, aguardar_proximo_mes())
+
+                # Editar/excluir lançamento (ver message_handler.tratar_clique_lancamento)
+                if data.startswith("g|") and chat_id:
+                    from tools.message_handler import tratar_clique_lancamento
+                    enviar_respostas(chat_id, tratar_clique_lancamento(
+                        data, user.get("id", chat_id), user.get("first_name", "")))
 
                 self._reply(200, "ok")
                 return
