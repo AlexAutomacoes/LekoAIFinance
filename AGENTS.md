@@ -273,7 +273,7 @@ Stripe reenvia o evento se não receber 2xx rápido.
 | `/plano` | mostra o plano atual e o uso do mês |
 | `/assinaturas` | mostra os botões dos planos pagos (`/assinar` continua valendo) |
 | `/chamado` | abre chamado em 2 perguntas (problema → esperado). Só plano pago |
-| `/cancelar` | cancela o rascunho de chamado ou a edição de lançamento em andamento |
+| `/cancelar` | cancela o rascunho de chamado, a edição de lançamento ou o nome de categoria em andamento |
 | `/lancamentos` | últimos 10 lançamentos em botões → editar ou excluir. Todos os planos, sem paywall |
 | `/manual` | envia o Guia do Usuário em PDF (`tools/assets/`) |
 | `/categorias` | lista as categorias em botões (`c|...`): criar, renomear, excluir |
