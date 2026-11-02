@@ -24,6 +24,7 @@ ACAO_REGISTRAR = "registrar"
 ACAO_RELATORIO = "relatorio"
 ACAO_CHAMADO = "chamado"      # abrir chamado é benefício de plano pago
 ACAO_CRIAR_CATEGORIA = "criar_categoria"
+ACAO_IMPORTAR_EXTRATO = "importar_extrato"   # importar extrato bancário: só plano pago
 
 # --- Motivos de bloqueio (o paywall usa pra escolher a mensagem) ------------
 MOTIVO_COTA = "cota_estourada"
@@ -96,6 +97,7 @@ def check_access(
          free/relatorio   -> liberado se período <= 7 dias
          free/chamado     -> BLOQUEADO sempre (não há cota: é só dos pagos)
          free/criar_categoria -> liberado se criou menos de 3
+         free/importar_extrato -> BLOQUEADO sempre (só dos pagos)
       6. senão            -> BLOQUEADO com o motivo
     """
     agora = agora or datetime.now(timezone.utc)
@@ -141,7 +143,12 @@ def check_access(
     # duas ações, não tem cota no free: quem chega aqui já não é admin, nem
     # vitalício, nem pagante em dia (os três saíram liberados lá em cima).
     if acao == ACAO_CHAMADO:
-        return Verdict(False, MOTIVO_SO_PAGO)
+        return Verdict(False, MOTIVO_SO_PAGO, meta={"acao": acao})
+
+    # Importar extrato também é só dos pagos: um extrato vira dezenas de
+    # lançamentos de uma vez, o que não cabe na cota de 20/mês do Grátis.
+    if acao == ACAO_IMPORTAR_EXTRATO:
+        return Verdict(False, MOTIVO_SO_PAGO, meta={"acao": acao})
 
     # 6) ação desconhecida: não travar um fluxo novo por engano
     return Verdict(True)

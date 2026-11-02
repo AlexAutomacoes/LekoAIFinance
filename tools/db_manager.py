@@ -389,3 +389,76 @@ def salvar_etapa_categoria(user_id: int, etapa) -> None:
         "categoria_etapa": etapa,
         "categoria_iniciada_em": datetime.now(timezone.utc).isoformat() if etapa else None,
     }).eq("id", user_id).execute()
+
+
+# --- Importar extrato ------------------------------------------------------------
+# A prévia do extrato fica em `importacoes` entre o envio do arquivo e o clique
+# em "Importar": o bot é serverless e não lembra da mensagem anterior. Mesma
+# regra de dono das outras: o id chega pelo callback_data, então tudo filtra
+# por id E user_id.
+
+def gastos_para_conferir_duplicados(user_id: int, data_inicio: str, data_fim: str) -> list:
+    """Lançamentos do período, só com o que a checagem de repetidos usa."""
+    resp = (_get_client().table("gastos").select("id_externo, data, valor")
+            .eq("user_id", user_id).gte("data", data_inicio).lte("data", data_fim).execute())
+    return resp.data
+
+
+def criar_importacao(user_id: int, arquivo: str, itens: list):
+    """Guarda a prévia (status 'pendente'). Devolve o id, ou None se falhou."""
+    resp = (_get_client().table("importacoes")
+            .insert({"user_id": user_id, "arquivo": arquivo, "itens": itens, "status": "pendente"})
+            .execute())
+    return resp.data[0]["id"] if resp.data else None
+
+
+def get_importacao(user_id: int, importacao_id: int):
+    resp = (_get_client().table("importacoes").select("id, status, itens, created_at")
+            .eq("id", importacao_id).eq("user_id", user_id).execute())
+    return resp.data[0] if resp.data else None
+
+
+def trocar_status_importacao(user_id: int, importacao_id: int, de: str, para: str,
+                             limpar_itens: bool = False) -> bool:
+    """
+    Muda o status SÓ se ele ainda for `de` — e diz se mudou. É a trava contra
+    clique duplo: dois toques em "Importar" chegam como dois updates, e só o
+    primeiro consegue passar de 'pendente' para 'importando'.
+    """
+    campos = {"status": para}
+    if para == "importada":
+        campos["importada_em"] = datetime.now(timezone.utc).isoformat()
+    if limpar_itens:
+        # A prévia tem as descrições do extrato da pessoa. Depois de importada
+        # (os dados já estão em `gastos`) ou cancelada, não há motivo para guardar.
+        campos["itens"] = []
+    resp = (_get_client().table("importacoes").update(campos)
+            .eq("id", importacao_id).eq("user_id", user_id).eq("status", de).execute())
+    return len(resp.data) > 0
+
+
+def inserir_importados(user_id: int, importacao_id: int, itens: list) -> int:
+    """Grava os lançamentos do extrato num insert só (cabe nos 10 s da Vercel)."""
+    agora = datetime.utcnow().isoformat()
+    linhas = [{
+        "user_id": user_id,
+        "status": t["status"],
+        "valor": t["valor"],
+        "categoria": t["categoria"],
+        "descricao": t["descricao"],
+        "data": t["data"],
+        "id_externo": t.get("id_externo"),
+        "importacao_id": importacao_id,
+        "created_at": agora,
+    } for t in itens]
+    if not linhas:
+        return 0
+    resp = _get_client().table("gastos").insert(linhas).execute()
+    return len(resp.data)
+
+
+def apagar_importados(user_id: int, importacao_id: int) -> int:
+    """Desfaz a importação: apaga só os lançamentos que vieram dela."""
+    resp = (_get_client().table("gastos").delete()
+            .eq("user_id", user_id).eq("importacao_id", importacao_id).execute())
+    return len(resp.data)

@@ -12,3 +12,7 @@ node_modules/
 # SO / temporarios
 .DS_Store
 .tmp/
+
+# Extratos bancários usados em teste: dado pessoal, nunca vai pro Git
+*.ofx
+*.qfx

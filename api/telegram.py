@@ -165,6 +165,20 @@ def enviar_respostas(chat_id: int, respostas) -> None:
             logging.warning(f"Tipo de resposta desconhecido: {tipo}")
 
 
+def baixar_arquivo(file_id: str) -> bytes:
+    """
+    Baixa um arquivo que o usuário mandou (extrato). O Telegram não entrega o
+    conteúdo no update, só o file_id: primeiro o getFile diz onde ele está,
+    depois vem o download. Sem log da URL — ela carrega o token do bot.
+    """
+    res = httpx.get(f"{API_BASE}/getFile", params={"file_id": file_id}, timeout=5)
+    res.raise_for_status()
+    caminho = res.json()["result"]["file_path"]
+    arquivo = httpx.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{caminho}", timeout=5)
+    arquivo.raise_for_status()
+    return arquivo.content
+
+
 def answer_callback_query(callback_query_id: str) -> None:
     """Responde o callback query para tirar o estado de carregamento do botão no Telegram."""
     payload = json.dumps({"callback_query_id": callback_query_id}).encode("utf-8")
@@ -346,10 +360,30 @@ class handler(BaseHTTPRequestHandler):
                     enviar_respostas(chat_id, tratar_clique_categoria(
                         data, user.get("id", chat_id), user.get("first_name", "")))
 
+                # Importar extrato (ver message_handler.tratar_clique_importacao)
+                if data.startswith("x|") and chat_id:
+                    from tools.message_handler import tratar_clique_importacao
+                    enviar_respostas(chat_id, tratar_clique_importacao(
+                        data, user.get("id", chat_id), user.get("first_name", "")))
+
                 self._reply(200, "ok")
                 return
 
             message = update.get("message") or update.get("edited_message")
+
+            # Arquivo enviado (extrato bancário). Só `message`: um documento
+            # "editado" não é um extrato novo.
+            if update.get("message") and "document" in message:
+                doc = message["document"]
+                user = message.get("from", {})
+                from tools.message_handler import processar_extrato
+                enviar_respostas(message["chat"]["id"], processar_extrato(
+                    doc.get("file_name") or "", doc.get("file_size") or 0,
+                    lambda: baixar_arquivo(doc["file_id"]),
+                    user.get("id", message["chat"]["id"]), user.get("first_name", "")))
+                self._reply(200, "ok")
+                return
+
             if not message or "text" not in message:
                 self._reply(200, "ok")  # ignora updates sem texto (stickers, etc.)
                 return

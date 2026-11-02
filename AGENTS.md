@@ -123,6 +123,14 @@ despacho dentro de `api/telegram.py` e ponha a regra de negócio num módulo de
 ### `gastos`
 `user_id` (integer), `status` (`"Entrada"` / `"Saída"`), `valor` (float —
 **negativo = saída, positivo = entrada**), `categoria`, `descricao`, `data` (`YYYY-MM-DD`).
+Desde `sql/etapa6_importar_extrato.sql`: `importacao_id` (de qual extrato veio; `NULL` = lançado
+pelo chat) e `id_externo` (FITID do OFX + data + valor; índice único parcial em `(user_id, id_externo)`
+impede importar o mesmo extrato duas vezes).
+
+### `importacoes`
+A prévia do extrato entre o envio do arquivo e o clique em "Importar". `status`:
+`pendente` → `importando` (trava contra clique duplo) → `importada` | `cancelada` | `desfeita`.
+`itens` (jsonb) é esvaziado ao importar ou cancelar — as descrições do extrato são dado pessoal.
 
 ### `categorias`
 `user_id`, `nome`, `padrao` (bool). Índice único em `(user_id, lower(nome))`. A lista nasce
@@ -207,6 +215,7 @@ o que aparece nas faturas de renovação e no cancelamento.
 - 20 lançamentos por mês (`LIMITE_LANCAMENTOS_FREE`)
 - relatório de no máximo 7 dias (`LIMITE_DIAS_RELATORIO_FREE`)
 - abrir `/chamado` é **exclusivo de plano pago**
+- importar extrato bancário é **exclusivo de plano pago** (`ACAO_IMPORTAR_EXTRATO`); desfazer uma importação não passa pelo paywall
 - criar até 3 categorias próprias (`LIMITE_CATEGORIAS_FREE`); renomear/excluir é livre.
   Teto de 30 categorias para todos os planos (cada uma vira botão e entra no prompt)
 
@@ -281,6 +290,12 @@ Stripe reenvia o evento se não receber 2xx rápido.
 
 Qualquer outra mensagem vai para a Camada 2 (IA).
 
+**Arquivo enviado (extrato `.ofx`)** não passa pela IA: `api/telegram.py` manda o documento para
+`message_handler.processar_extrato`, que checa o plano **antes** de baixar, lê com
+`tools/extrato.py` (módulo puro: OFX SGML/XML, categorias por regras, duplicados) e devolve uma
+prévia com botões `x|...`. Nada é gravado até o clique em "Importar"; depois dá para desfazer a
+importação inteira. Foto, sticker etc. continuam ignorados.
+
 **Quiz do parceiro** (`tools/quiz_link.py`): usa um **Supabase separado**
 (`QUIZ_SUPABASE_URL` / `QUIZ_SUPABASE_ANON_KEY`), não o do projeto. Regra de
 ouro do módulo: *nada ali pode derrubar o `/start`* — qualquer falha vira log e segue.
@@ -339,6 +354,7 @@ tools/
   llm_router.py            Camada 2 — única chamada de IA (Groq)
   db_manager.py            Camada 3 — Supabase (users, gastos)
   subscription.py          regras de plano — módulo PURO, sem I/O
+  extrato.py               leitura de extrato OFX + categorias por regras — módulo PURO
   payment_service.py       Stripe: webhook + criar checkout (PIX/cartão/assinatura)
   chamados_service.py      /api/chamados — dashboard de chamados
   suporte_n1.py            braço determinístico do agente do Kiro (CLI, saída JSON)
