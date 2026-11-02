@@ -79,7 +79,10 @@ def _valor_ofx(valor):
 
 
 def _limpar_descricao(texto) -> str:
-    return " ".join(str(texto or "").split())[:120]
+    # 'Pix enviado: "Cp :12345678-AUTO POSTO"' -> 'Pix enviado: AUTO POSTO'. O código
+    # do Inter (e as aspas) é ruído na lista de lançamentos.
+    texto = re.sub(r"Cp\s*:\s*\d+\s*-\s*", "", str(texto or ""), flags=re.IGNORECASE)
+    return " ".join(texto.replace('"', " ").split())[:120]
 
 
 def ler_ofx(conteudo: bytes) -> dict:
@@ -116,6 +119,9 @@ def ler_ofx(conteudo: bytes) -> dict:
 
         fitid = _campo(bloco, "FITID")
         transacoes.append({
+            # Quem está do outro lado (o NAME do OFX). Serve só para achar
+            # transferência entre contas da própria pessoa; não vai para o banco.
+            "contraparte": " ".join(_sem_acento(_campo(bloco, "NAME") or "").upper().split()),
             "status": "Entrada" if valor > 0 else "Saída",
             "valor": valor,
             "descricao": descricao or "Sem descrição",
@@ -145,9 +151,11 @@ def _sem_acento(texto: str) -> str:
 # A ordem importa: a primeira que bater ganha. Saídas e entradas separadas
 # porque "PIX" ou "TRANSFERENCIA" não dizem nada sozinhos.
 REGRAS_SAIDA = [
+    ("Investimentos", ["NOTA BOV", "DEBITO B3"]),  # compra de ações/FII na corretora
     ("Alimentação", ["IFOOD", "RAPPI", "MERCADO", "SUPERMERC", "ATACAD", "ASSAI", "CARREFOUR",
                      "PADARIA", "PANIFIC", "RESTAURANTE", "LANCHONETE", "PIZZA", "BURGER",
-                     "MCDONALD", "SUBWAY", "HORTIFRUTI", "ACOUGUE", "PAO DE ACUCAR", "ZE DELIVERY"]),
+                     "MCDONALD", "SUBWAY", "HORTIFRUTI", "ACOUGUE", "PAO DE ACUCAR", "ZE DELIVERY",
+                     "FOOD", "COMPANHIA BRASILEIRA DE DISTRIBUICAO"]),  # CBD = Grupo Pão de Açúcar
     ("Transporte", ["UBER", "99APP", "99 TAXI", "99POP", "CABIFY", "POSTO", "COMBUSTIV", "SHELL",
                     "IPIRANGA", "PETROBRAS", "ESTACIONAMENTO", "SEM PARAR", "CONECTCAR", "VELOE",
                     "METRO", "BILHETE UNICO", "PEDAGIO"]),
@@ -162,13 +170,14 @@ REGRAS_SAIDA = [
                "SYMPLA"]),
     ("Educação", ["ESCOLA", "COLEGIO", "FACULDADE", "UNIVERSIDADE", "CURSO", "UDEMY", "ALURA",
                   "LIVRARIA"]),
-    ("Vestuário", ["RENNER", "RIACHUELO", "C&A", "CEA ", "ZARA", "SHEIN", "NETSHOES", "CENTAURO",
+    ("Vestuário", ["RENNER", "RIACHUELO", "C&A", "CEA ", " C E A ", "ZARA", "SHEIN", "NETSHOES", "CENTAURO",
                    "HERING"]),
     ("Investimentos", ["APLICACAO", "CDB", "TESOURO", "CORRETORA", "INVEST"]),
 ]
 REGRAS_ENTRADA = [
     ("Salário", ["SALARIO", "PROVENTO", "FOLHA", "PAGTO SAL", "REMUNERACAO"]),
-    ("Investimentos", ["RENDIMENTO", "RESGATE", "DIVIDENDO", "JUROS", "CDB", "TESOURO"]),
+    ("Investimentos", ["RENDIMENTO", "RESGATE", "DIVIDENDO", "JUROS", "CDB", "TESOURO",
+                       "EVENTO B3"]),
 ]
 
 
@@ -192,6 +201,50 @@ def categoria_por_regra(descricao: str, status: str, categorias_usuario: list = 
         if any(p in alvo for p in palavras):
             return categoria
     return "Outros"
+
+
+# --- Movimentação interna ----------------------------------------------------------
+# Dinheiro que só muda de lugar (guardar no CDB, tirar do CDB, mandar de uma
+# conta própria para outra) não é gasto nem renda. Num extrato real de teste, isso
+# multiplicava as "entradas" do mês várias vezes acima da renda de verdade: o
+# relatório viraria ficção. Essas linhas ficam de fora e a prévia mostra quantas foram.
+
+# Aplicar/resgatar na própria conta (CDB automático, "porquinho", poupança).
+PALAVRAS_APLICACAO = ("RESGATE", "APLICACAO", "PORQUINHO", "POUPANCA", "COFRINHO", "CAIXINHA")
+PALAVRAS_TRANSFERENCIA = ("PIX", "TED", "DOC", "TRANSF")
+
+
+def separar_internas(transacoes: list, primeiro_nome: str = ""):
+    """
+    Divide em (validas, internas).
+
+    Transferência para si mesmo: o OFX não traz o nome do dono da conta, então
+    a regra exige DUAS pistas juntas — a mesma pessoa aparece mandando E
+    recebendo no extrato, e o primeiro nome dela é o do usuário no Telegram.
+    Só uma das pistas não basta: dividir a conta com um amigo também gera Pix
+    nos dois sentidos. Sem o nome batendo, a transferência entra normal (dá
+    para excluir em /lancamentos); esconder um gasto de verdade seria pior.
+    """
+    def eh_transferencia(t):
+        return any(p in _sem_acento(t["descricao"]).upper() for p in PALAVRAS_TRANSFERENCIA)
+
+    nome = _sem_acento(primeiro_nome or "").upper().strip()
+    enviou = {t["contraparte"] for t in transacoes
+              if t["valor"] < 0 and t.get("contraparte") and eh_transferencia(t)}
+    recebeu = {t["contraparte"] for t in transacoes
+               if t["valor"] > 0 and t.get("contraparte") and eh_transferencia(t)}
+    proprias = {c for c in enviou & recebeu if nome and c.split()[0] == nome}
+
+    validas, internas = [], []
+    for t in transacoes:
+        desc = _sem_acento(t["descricao"]).upper()
+        aplicacao = desc.startswith(PALAVRAS_APLICACAO) or any(
+            p in desc for p in ("PORQUINHO", "COFRINHO", "CAIXINHA"))
+        if aplicacao or (eh_transferencia(t) and t.get("contraparte") in proprias):
+            internas.append(t)
+        else:
+            validas.append(t)
+    return validas, internas
 
 
 # --- Duplicados -----------------------------------------------------------------

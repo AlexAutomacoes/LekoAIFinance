@@ -926,7 +926,7 @@ def _botoes_previa(importacao_id: int, n: int, com_lista: bool = True) -> list:
     return [primeira, [{"texto": "❌ Cancelar", "dados": f"x|no|{importacao_id}"}]]
 
 
-def _resumo_previa(novas: list, repetidas: list, cartao: bool) -> str:
+def _resumo_previa(novas: list, repetidas: list, cartao: bool, internas: int = 0) -> str:
     entradas = [t for t in novas if t["status"] == "Entrada"]
     saidas = [t for t in novas if t["status"] == "Saída"]
     datas = sorted(t["data"] for t in novas)
@@ -942,6 +942,10 @@ def _resumo_previa(novas: list, repetidas: list, cartao: bool) -> str:
               f"⬇️ {len(saidas)} saída(s) — R$ {_fmt_moeda(sum(t['valor'] for t in saidas))}"]
     if repetidas:
         linhas.append(f"🔁 {len(repetidas)} já estava(m) lançada(s) — vou pular.")
+    if internas:
+        linhas.append(f"🔄 {internas} movimentação(ões) entre suas contas e investimentos "
+                      "(resgate, aplicação, Pix para você mesmo) ficaram de fora: não são "
+                      "gasto nem renda.")
     if maiores:
         linhas += ["", "Saídas por categoria:"]
         linhas += [f"• {cat}: R$ {_fmt_moeda(v)}" for cat, v in maiores]
@@ -977,7 +981,13 @@ def processar_extrato(nome_arquivo: str, tamanho: int, baixar, telegram_id: int,
         except extrato.ExtratoInvalido as e:
             return [f"😕 {e}\n\n{MSG_FORMATO_EXTRATO}"]
 
-        transacoes = lido["transacoes"]
+        transacoes, internas = extrato.separar_internas(lido["transacoes"], first_name)
+        for t in lido["transacoes"]:
+            t.pop("contraparte", None)  # só servia para a regra acima; não vai para o banco
+        if not transacoes:
+            return [f"🔄 Li {len(internas)} transação(ões), mas todas são movimentações entre "
+                    "suas contas e investimentos (resgate, aplicação, Pix para você mesmo). "
+                    "Isso não é gasto nem renda, então não há nada para importar. 🙂"]
         _categorizar(transacoes, row["id"])
         existentes = gastos_para_conferir_duplicados(row["id"], transacoes[0]["data"],
                                                      transacoes[-1]["data"])
@@ -990,7 +1000,7 @@ def processar_extrato(nome_arquivo: str, tamanho: int, baixar, telegram_id: int,
         if importacao_id is None:
             return [MSG_FALHA_EXTRATO]
         return [{"tipo": "botoes",
-                 "mensagem": _resumo_previa(novas, repetidas, lido["cartao"]),
+                 "mensagem": _resumo_previa(novas, repetidas, lido["cartao"], len(internas)),
                  "botoes": _botoes_previa(importacao_id, len(novas))}]
     except Exception as e:
         logging.error(f"Erro ao processar extrato: {e}", exc_info=True)

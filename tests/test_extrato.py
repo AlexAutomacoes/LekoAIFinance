@@ -51,8 +51,9 @@ class TestLeituraOfx(unittest.TestCase):
         self.assertFalse(lido["cartao"])
         t = lido["transacoes"]
         self.assertEqual(len(t), 4)
-        self.assertEqual(t[0], {"status": "Saída", "valor": -45.9, "descricao": "IFOOD *RESTAURANTE",
-                                "data": "2026-10-03", "id_externo": "A1|2026-10-03|-45.90"})
+        self.assertEqual(t[0], {"contraparte": "", "status": "Saída", "valor": -45.9,
+                                "descricao": "IFOOD *RESTAURANTE", "data": "2026-10-03",
+                                "id_externo": "A1|2026-10-03|-45.90"})
         self.assertEqual(t[1]["status"], "Entrada")
         self.assertEqual(t[1]["valor"], 3500.0)
 
@@ -121,6 +122,63 @@ class TestCategoriaPorRegra(unittest.TestCase):
 
     def test_categoria_do_usuario_escrita_na_descricao_ganha(self):
         self.assertEqual(extrato.categoria_por_regra("PETZ PETS LTDA", "Saída", ["Pets"]), "Pets")
+
+
+def ofx_com_nome(transacoes):
+    """Como o do Inter: MEMO com 'Cp :<código>-' e o NAME da contraparte."""
+    blocos = "".join(
+        f"<STMTTRN>\n<DTPOSTED>{d}\n<TRNAMT>{v}\n<FITID>{fid}\n<MEMO>{memo}\n<NAME>{nome}\n</STMTTRN>\n"
+        for d, v, fid, memo, nome in transacoes)
+    return f"<OFX>\n<STMTRS>\n<BANKTRANLIST>\n{blocos}</BANKTRANLIST>\n</STMTRS>\n</OFX>".encode()
+
+
+# Formato do extrato do Inter, que motivou as regras. Valores, nomes e códigos
+# são todos fictícios: extrato de cliente é dado pessoal e não vai para o Git.
+INTER = ofx_com_nome([
+    ("20261001", "500.00", "I1", 'Resgate: "CDB PORQUINHO BANCO X S A"', "Cdb Porquinho"),
+    ("20261001", "-500.00", "I2", 'Pix enviado: "Cp :11111111-Ana Maria Souza"', "Ana Maria Souza"),
+    ("20261002", "120.00", "I3", 'Pix recebido: "Cp :11111111-ANA MARIA SOUZA"', "Ana Maria Souza"),
+    ("20261002", "-800.00", "I4", 'Aplicacao: "CDB CREDITO BANCO X S A"', "Cdb Credito"),
+    ("20261007", "-300.00", "I5", 'Debito B3: "NOTA BOV 05/10/2026"', "Nota Bov"),
+    ("20261015", "2000.00", "I6", 'Recebimento de proventos: "PAGAMENTO DE PROVENTOS EMPRESA"', "Empresa"),
+    ("20261015", "10.00", "I7", 'Credito Evento B3: "* PROV * RENDIMENTO 100 ABCD11"', "Prov"),
+    ("20261017", "-20.00", "I8", 'Pix enviado: "Cp :22222222-LANCHE BOM FOOD"', "Lanche Bom Food"),
+    ("20261020", "-30.00", "I9", 'Pix enviado: "Cp :1-Joao Lima"', "Joao Lima"),
+    ("20261021", "15.00", "I10", 'Pix recebido: "Cp :1-Joao Lima"', "Joao Lima"),
+])
+
+
+class TestExtratoReal(unittest.TestCase):
+
+    def setUp(self):
+        self.t = extrato.ler_ofx(INTER)["transacoes"]
+
+    def test_descricao_sem_o_codigo_do_banco_nem_aspas(self):
+        self.assertEqual(self.t[1]["descricao"], "Pix enviado: Ana Maria Souza")
+
+    def test_aplicacao_resgate_e_pix_para_si_mesmo_ficam_de_fora(self):
+        validas, internas = extrato.separar_internas(self.t, "Ana")
+        self.assertEqual(sorted(t["id_externo"].split("|")[0] for t in internas),
+                         ["I1", "I2", "I3", "I4"])
+        self.assertEqual(len(validas), 6)
+
+    def test_pix_nos_dois_sentidos_com_outra_pessoa_entra(self):
+        # Dividir a conta com o João gera Pix indo e voltando, mas não é o usuário.
+        validas, _ = extrato.separar_internas(self.t, "Ana")
+        self.assertIn("Pix enviado: Joao Lima", [t["descricao"] for t in validas])
+
+    def test_sem_o_nome_batendo_a_transferencia_entra(self):
+        # Na dúvida, importa (dá para excluir); esconder um gasto real seria pior.
+        _, internas = extrato.separar_internas(self.t, "Beto")
+        self.assertEqual(sorted(t["id_externo"].split("|")[0] for t in internas), ["I1", "I4"])
+
+    def test_categorias_do_extrato_real(self):
+        cat = {t["id_externo"].split("|")[0]: extrato.categoria_por_regra(t["descricao"], t["status"])
+               for t in self.t}
+        self.assertEqual(cat["I5"], "Investimentos")   # compra na B3
+        self.assertEqual(cat["I6"], "Salário")
+        self.assertEqual(cat["I7"], "Investimentos")   # rendimento de FII
+        self.assertEqual(cat["I8"], "Alimentação")
 
 
 class TestDuplicados(unittest.TestCase):
@@ -247,6 +305,22 @@ class TestEnvioDoArquivo(BaseImportacao):
         self.p["gastos_para_conferir_duplicados"].return_value = lido
         r = self.enviar()
         self.assertIn("todas já estavam lançadas", r[0])
+        self.p["criar_importacao"].assert_not_called()
+
+    def test_movimentacao_interna_fica_fora_e_e_avisada(self):
+        self.baixar.return_value = INTER
+        r = self.enviar()
+        itens = self.p["criar_importacao"].call_args[0][2]
+        self.assertEqual(len(itens), 6)
+        self.assertNotIn("contraparte", itens[0])  # não vai para o banco
+        self.assertIn("4 movimentação(ões)", r[0]["mensagem"])
+
+    def test_extrato_so_com_movimentacao_interna(self):
+        self.baixar.return_value = ofx_com_nome([
+            ("20261001", "100.00", "R1", "Resgate: CDB", "Cdb"),
+            ("20261001", "-100.00", "R2", "Aplicacao: CDB", "Cdb")])
+        r = self.enviar()
+        self.assertIn("movimentações entre suas contas", r[0])
         self.p["criar_importacao"].assert_not_called()
 
     def test_ofx_invalido_responde_sem_quebrar(self):
