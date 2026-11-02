@@ -34,6 +34,12 @@ from tools.db_manager import (
     renomear_categoria,
     excluir_categoria,
     salvar_etapa_categoria,
+    gastos_para_conferir_duplicados,
+    criar_importacao,
+    get_importacao,
+    trocar_status_importacao,
+    inserir_importados,
+    apagar_importados,
     CATEGORIA_RESERVA,
 )
 from tools.llm_router import extract_transaction, generate_financial_tips
@@ -49,11 +55,13 @@ from tools.subscription import (
     MOTIVO_SO_PAGO,
     ACAO_CHAMADO,
     ACAO_CRIAR_CATEGORIA,
+    ACAO_IMPORTAR_EXTRATO,
     MOTIVO_LIMITE_CATEGORIAS,
     LIMITE_CATEGORIAS_FREE,
 )
 from tools.payment_service import criar_checkout
 from tools.quiz_link import vincular_telegram
+from tools import extrato
 
 # Acima deste nº de dias, o relatório vira arquivo (PDF/Excel) em vez de texto no chat ("mais de 1 semana").
 LIMITE_DIAS_PDF = 7
@@ -129,7 +137,8 @@ def _build_welcome(name: str, internal_id: int) -> str:
         f"✏️ Errou um lançamento? /lancamentos para corrigir ou excluir.\n"
         f"🏷️ Suas categorias: /categorias para criar, renomear ou excluir.\n"
         f"📘 Manual completo, passo a passo: /manual\n"
-        f"🛠️ Nos planos pagos você ainda abre chamado direto com a equipe: /chamado"
+        f"🛠️ Nos planos pagos você ainda abre chamado direto com a equipe: /chamado\n"
+        f"📎 E pode me mandar o extrato do banco (arquivo .ofx) para eu lançar tudo de uma vez."
     )
 
 
@@ -396,6 +405,11 @@ def _msg_bloqueio(verdict) -> list:
         return [_menu_planos(f"⛔ No plano Grátis dá para criar até {limite} categorias próprias.\n"
                              "Você ainda pode renomear ou excluir as que já tem (/categorias).\n\n"
                              "🚀 Faça o upgrade para criar quantas quiser:")]
+    if verdict.motivo == MOTIVO_SO_PAGO and verdict.meta.get("acao") == ACAO_IMPORTAR_EXTRATO:
+        return [_menu_planos("⛔ Importar extrato bancário é um benefício dos planos pagos.\n\n"
+                             "Enquanto isso, dá para lançar seus gastos por mensagem, "
+                             "como \"gastei 50 no mercado\".\n\n"
+                             "🚀 Faça o upgrade para importar o extrato inteiro de uma vez:")]
     if verdict.motivo == MOTIVO_SO_PAGO:
         return [_menu_planos("⛔ Abrir chamado é um benefício dos planos pagos.\n\n"
                              "🚀 Faça o upgrade para falar direto com a equipe:")]
@@ -862,6 +876,231 @@ def _responder_nome_categoria(user_row, texto: str) -> list:
         return _lista_categorias(user_id, f"✅ \"{antiga['nome']}\" agora se chama \"{nome}\"{extra}.")
 
     return ["Não consegui identificar o que você estava fazendo. Mande /categorias de novo."]
+
+
+# --- Importar extrato bancário ---------------------------------------------------
+# O arquivo é lido por código (tools/extrato.py), sem IA, e nada é gravado antes
+# de a pessoa conferir a prévia e tocar em "Importar": 80 lançamentos errados de
+# uma vez são muito piores que um. Exclusivo dos planos pagos.
+#
+# callback_data dos botões (limite do Telegram: 64 bytes):
+#   x|ok|<id>       importa a prévia
+#   x|ver|<id>      mostra a lista da prévia
+#   x|no|<id>       cancela a prévia
+#   x|undo|<id>     pede confirmação para desfazer uma importação feita
+#   x|undook|<id>   desfaz de fato (apaga só o que veio do extrato)
+#   x|manter|<id>   desistiu de desfazer
+IMPORTACAO_EXPIRA_HORAS = 24
+LIMITE_LINHAS_PREVIA = 40  # a mensagem do Telegram tem teto de 4096 caracteres
+
+MSG_FORMATO_EXTRATO = ("📎 Por enquanto eu leio extrato no formato OFX.\n\n"
+                       "No app ou no internet banking do seu banco, procure \"Exportar extrato\" "
+                       "e escolha OFX (às vezes aparece como \"Money\" ou \"Quicken\"). "
+                       "Depois é só me mandar o arquivo aqui.")
+MSG_FALHA_EXTRATO = "😕 Não consegui ler seu extrato agora. Tente de novo em instantes."
+MSG_IMPORTACAO_SUMIU = "🤔 Não encontrei essa importação. Mande o arquivo do extrato de novo. 📎"
+
+
+def _categorizar(transacoes: list, user_id: int) -> None:
+    """Põe em cada transação uma categoria da lista do usuário (por regras, sem IA)."""
+    try:
+        categorias = listar_categorias(user_id)
+    except Exception as e:
+        # Mesmo raciocínio do _interpretar: categoria é organização, não pode
+        # impedir a importação. Sem a lista, vale o nome da regra.
+        logging.error(f"falha ao listar categorias do usuário {user_id}: {e}")
+        categorias = []
+    nomes = [c["nome"] for c in categorias]
+    # Só as criadas por ele entram na busca pelo nome na descrição: as padrão
+    # dariam falso positivo ("TRANSF ENTRE CONTAS" não é a categoria Contas).
+    proprias = [c["nome"] for c in categorias if not c.get("padrao")]
+    for t in transacoes:
+        nome = extrato.categoria_por_regra(t["descricao"], t["status"], proprias)
+        t["categoria"] = _categoria_da_lista(nome, nomes) if nomes else nome
+
+
+def _botoes_previa(importacao_id: int, n: int, com_lista: bool = True) -> list:
+    primeira = [{"texto": f"✅ Importar {n}", "dados": f"x|ok|{importacao_id}"}]
+    if com_lista:
+        primeira.append({"texto": "👀 Ver lista", "dados": f"x|ver|{importacao_id}"})
+    return [primeira, [{"texto": "❌ Cancelar", "dados": f"x|no|{importacao_id}"}]]
+
+
+def _resumo_previa(novas: list, repetidas: list, cartao: bool) -> str:
+    entradas = [t for t in novas if t["status"] == "Entrada"]
+    saidas = [t for t in novas if t["status"] == "Saída"]
+    datas = sorted(t["data"] for t in novas)
+    por_categoria = {}
+    for t in saidas:
+        por_categoria[t["categoria"]] = por_categoria.get(t["categoria"], 0) + abs(t["valor"])
+    maiores = sorted(por_categoria.items(), key=lambda kv: kv[1], reverse=True)[:5]
+
+    linhas = [f"📄 {'Fatura do cartão' if cartao else 'Extrato'} lido: {len(novas)} lançamento(s) "
+              f"novo(s), de {_fmt_data(datas[0])} a {_fmt_data(datas[-1])}.",
+              "",
+              f"⬆️ {len(entradas)} entrada(s) — R$ {_fmt_moeda(sum(t['valor'] for t in entradas))}",
+              f"⬇️ {len(saidas)} saída(s) — R$ {_fmt_moeda(sum(t['valor'] for t in saidas))}"]
+    if repetidas:
+        linhas.append(f"🔁 {len(repetidas)} já estava(m) lançada(s) — vou pular.")
+    if maiores:
+        linhas += ["", "Saídas por categoria:"]
+        linhas += [f"• {cat}: R$ {_fmt_moeda(v)}" for cat, v in maiores]
+    linhas += ["", "Nada foi gravado ainda. Confira e toque em Importar. As categorias foram "
+                   "escolhidas pela descrição; dá para corrigir depois em /lancamentos."]
+    return "\n".join(linhas)
+
+
+def processar_extrato(nome_arquivo: str, tamanho: int, baixar, telegram_id: int,
+                      first_name: str) -> list:
+    """
+    O usuário mandou um arquivo. `baixar` é uma função sem argumentos que
+    devolve os bytes: só é chamada depois do gate e das checagens baratas,
+    para que quem não pode importar não gaste download nem leitura.
+    Devolve a prévia com os botões — não grava nenhum lançamento.
+    """
+    try:
+        row = get_or_create_user_row(telegram_id, first_name)
+        if _precisa_escolher_plano(row):
+            return [_menu_planos(MSG_ESCOLHA_PLANO, gratis="escolher")]
+        bloqueio = _gate(row, ACAO_IMPORTAR_EXTRATO, "importar-extrato")
+        if bloqueio:
+            return bloqueio
+
+        if not str(nome_arquivo or "").lower().endswith(extrato.EXTENSOES_OFX):
+            return [MSG_FORMATO_EXTRATO]
+        if (tamanho or 0) > extrato.TAMANHO_MAXIMO_BYTES:
+            return ["😕 Esse arquivo é grande demais para um extrato (máximo de 1 MB). "
+                    "Exporte um período menor, um mês por exemplo."]
+
+        try:
+            lido = extrato.ler_ofx(baixar())
+        except extrato.ExtratoInvalido as e:
+            return [f"😕 {e}\n\n{MSG_FORMATO_EXTRATO}"]
+
+        transacoes = lido["transacoes"]
+        _categorizar(transacoes, row["id"])
+        existentes = gastos_para_conferir_duplicados(row["id"], transacoes[0]["data"],
+                                                     transacoes[-1]["data"])
+        novas, repetidas = extrato.separar_duplicados(transacoes, existentes)
+        if not novas:
+            return [f"✅ Li {len(transacoes)} transação(ões), e todas já estavam lançadas. "
+                    "Não há nada novo para importar. 🙂"]
+
+        importacao_id = criar_importacao(row["id"], str(nome_arquivo)[:100], novas)
+        if importacao_id is None:
+            return [MSG_FALHA_EXTRATO]
+        return [{"tipo": "botoes",
+                 "mensagem": _resumo_previa(novas, repetidas, lido["cartao"]),
+                 "botoes": _botoes_previa(importacao_id, len(novas))}]
+    except Exception as e:
+        logging.error(f"Erro ao processar extrato: {e}", exc_info=True)
+        return [MSG_FALHA_EXTRATO]
+
+
+def _lista_previa(importacao_id: int, itens: list) -> list:
+    linhas = [f"{_fmt_data(t['data'])[:5]} · {_valor_com_sinal(t['valor'])} · "
+              f"{t['categoria']} · {t['descricao'][:28]}"
+              for t in itens[:LIMITE_LINHAS_PREVIA]]
+    if len(itens) > LIMITE_LINHAS_PREVIA:
+        linhas.append(f"… e mais {len(itens) - LIMITE_LINHAS_PREVIA}.")
+    return [{"tipo": "botoes",
+             "mensagem": "🧾 O que vai entrar:\n\n" + "\n".join(linhas),
+             "botoes": _botoes_previa(importacao_id, len(itens), com_lista=False)}]
+
+
+def _importar(row, importacao_id: int, itens: list) -> list:
+    user_id = row["id"]
+    # O plano pode ter vencido entre a prévia e o clique.
+    bloqueio = _gate(row, ACAO_IMPORTAR_EXTRATO, "importar-extrato-botao")
+    if bloqueio:
+        return bloqueio
+    # Trava contra clique duplo: só um update consegue sair de 'pendente'.
+    if not trocar_status_importacao(user_id, importacao_id, "pendente", "importando"):
+        return ["⏳ Esse extrato já está sendo importado (ou já foi). Confira em /lancamentos."]
+    try:
+        # Confere de novo pelo id do banco: entre a prévia e o clique, outro
+        # extrato do mesmo período pode ter sido importado.
+        datas = sorted(t["data"] for t in itens)
+        existentes = gastos_para_conferir_duplicados(user_id, datas[0], datas[-1])
+        ja_tem = {e["id_externo"] for e in existentes if e.get("id_externo")}
+        itens = [t for t in itens if not (t.get("id_externo") and t["id_externo"] in ja_tem)]
+        n = inserir_importados(user_id, importacao_id, itens)
+    except Exception as e:
+        logging.error(f"falha ao importar extrato {importacao_id}: {e}", exc_info=True)
+        # Volta para 'pendente' para a pessoa poder tentar de novo pelo mesmo botão.
+        trocar_status_importacao(user_id, importacao_id, "importando", "pendente")
+        return ["😕 Não consegui importar agora. Toque em Importar de novo daqui a pouco."]
+    trocar_status_importacao(user_id, importacao_id, "importando", "importada", limpar_itens=True)
+    return [{"tipo": "botoes",
+             "mensagem": (f"✅ Importei {n} lançamento(s)!\n\n"
+                          "Para ver ou corrigir algum: /lancamentos\n"
+                          "Se algo saiu errado, dá para desfazer a importação inteira:"),
+             "botoes": [[{"texto": "↩️ Desfazer importação", "dados": f"x|undo|{importacao_id}"}]]}]
+
+
+def tratar_clique_importacao(data: str, telegram_id: int, first_name: str) -> list:
+    """Clique num dos botões x|... (ver acima). Devolve a lista de respostas."""
+    partes = data.split("|")
+    acao = partes[1] if len(partes) > 1 else ""
+    try:
+        importacao_id = int(partes[2])
+    except (IndexError, ValueError):
+        return ["Não entendi esse botão. Mande o arquivo do extrato de novo. 📎"]
+
+    row = get_or_create_user_row(telegram_id, first_name)
+    user_id = row["id"]
+    # Filtra pelo dono: um id forjado de outra pessoa cai como "não encontrada".
+    imp = get_importacao(user_id, importacao_id)
+    if imp is None:
+        return [MSG_IMPORTACAO_SUMIU]
+    status = imp.get("status")
+
+    if acao in ("ok", "ver", "no"):
+        if status == "importada":
+            return ["✅ Esse extrato já foi importado. Confira em /lancamentos."]
+        if status == "importando":
+            return ["⏳ Já estou importando esse extrato. Confira em /lancamentos daqui a pouco."]
+        if status != "pendente":
+            return ["Essa prévia foi cancelada. Para importar, mande o arquivo de novo. 📎"]
+        if not _dentro_do_prazo(imp.get("created_at"), IMPORTACAO_EXPIRA_HORAS * 60):
+            return ["⌛ Essa prévia expirou. Mande o arquivo do extrato de novo. 📎"]
+        itens = imp.get("itens") or []
+        if not itens:
+            return [MSG_IMPORTACAO_SUMIU]
+        if acao == "ver":
+            return _lista_previa(importacao_id, itens)
+        if acao == "no":
+            trocar_status_importacao(user_id, importacao_id, "pendente", "cancelada",
+                                     limpar_itens=True)
+            return ["Beleza, não importei nada. 👍"]
+        return _importar(row, importacao_id, itens)
+
+    # Desfazer não passa pelo paywall: apagar os próprios dados não pode
+    # depender de plano (mesma regra do /lancamentos).
+    if acao == "undo":
+        if status != "importada":
+            return ["Essa importação não está ativa, então não há o que desfazer. 🙂"]
+        return [{"tipo": "botoes",
+                 "mensagem": ("⚠️ Desfazer apaga TODOS os lançamentos que vieram desse extrato, "
+                              "inclusive os que você corrigiu depois. O que você lançou por "
+                              "mensagem não é afetado. Confirma?"),
+                 "botoes": [[{"texto": "✅ Sim, desfazer", "dados": f"x|undook|{importacao_id}"},
+                             {"texto": "Não", "dados": f"x|manter|{importacao_id}"}]]}]
+    if acao == "undook":
+        if not trocar_status_importacao(user_id, importacao_id, "importada", "desfeita"):
+            return ["Essa importação já foi desfeita. 🙂"]
+        try:
+            n = apagar_importados(user_id, importacao_id)
+        except Exception as e:
+            logging.error(f"falha ao desfazer importação {importacao_id}: {e}", exc_info=True)
+            # Volta o status para o botão "Desfazer" continuar funcionando.
+            trocar_status_importacao(user_id, importacao_id, "desfeita", "importada")
+            return ["😕 Não consegui desfazer agora. Toque em Desfazer de novo daqui a pouco."]
+        return [f"↩️ Importação desfeita: apaguei {n} lançamento(s) que vieram do extrato."]
+    if acao == "manter":
+        return ["👍 Mantive tudo como está."]
+
+    return ["Não entendi esse botão. Mande o arquivo do extrato de novo. 📎"]
 
 
 def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dict = None) -> list:
