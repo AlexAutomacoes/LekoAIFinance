@@ -1005,5 +1005,64 @@ class TestValorSoltoNaEdicao(BaseBot):
         self.p["atualizar_lancamento"].assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# Cota da Groq esgotada: avisar com clareza, nunca "erro interno"
+# ---------------------------------------------------------------------------
+class TestLimiteIA(BaseBot):
+
+    def test_cota_do_dia_avisa_e_nao_registra(self):
+        self.p["extract_transaction"].side_effect = mh.LimiteIA(diaria=True)
+        self.assertEqual(self.msg("gastei 50 no mercado"), [mh.MSG_LIMITE_DIA])
+        self.p["insert_transaction"].assert_not_called()
+
+    def test_cota_por_minuto_pede_para_esperar(self):
+        self.p["extract_transaction"].side_effect = mh.LimiteIA(diaria=False)
+        self.assertEqual(self.msg("gastei 50 no mercado"), [mh.MSG_LIMITE_MINUTO])
+
+    def test_cota_no_meio_da_edicao_nao_mexe_no_lancamento(self):
+        self.row = usuario(edicao_gasto_id=42, edicao_iniciada_em=AGORA.isoformat())
+        self.p["extract_transaction"].side_effect = mh.LimiteIA(diaria=True)
+        self.assertEqual(self.msg("muda para 40"), [mh.MSG_LIMITE_DIA])
+        self.p["atualizar_lancamento"].assert_not_called()
+        self.p["salvar_edicao"].assert_not_called()  # segue editando: dá para tentar de novo
+
+    def test_relatorio_sai_mesmo_sem_cota_para_as_dicas(self):
+        self.ia({"acao": "relatorio", "mensagem": "", "formato": "opcao",
+                 "periodo": {"data_inicio": "2026-10-27", "data_fim": "2026-10-28"}})
+        self.p["get_transactions"].return_value = [GASTO]
+        self.p["generate_financial_tips"].side_effect = mh.LimiteIA(diaria=True)
+        r = self.msg("relatório de ontem")
+        self.assertIn("Relatório Financeiro", r[0])
+        self.assertEqual(r[1], mh.MSG_DICAS_SEM_COTA)
+
+
+class TestTraducaoDo429(unittest.TestCase):
+    """O 429 da Groq vira LimiteIA, e o texto do erro diz se é o teto do dia."""
+
+    def _erro_429(self, texto):
+        import httpx
+        from groq import RateLimitError
+        resp = httpx.Response(429, request=httpx.Request("POST", "https://api.groq.com"))
+        return RateLimitError(texto, response=resp, body=None)
+
+    def _chamar(self, texto):
+        from tools import llm_router
+        cliente = mock.Mock()
+        cliente.chat.completions.create.side_effect = self._erro_429(texto)
+        with self.assertRaises(llm_router.LimiteIA) as ctx:
+            llm_router._chamar_groq(cliente, model="x", messages=[])
+        return ctx.exception
+
+    def test_teto_do_dia(self):
+        e = self._chamar("Rate limit reached for model `openai/gpt-oss-120b` "
+                         "on tokens per day (TPD): Limit 200000, Used 199000")
+        self.assertTrue(e.diaria)
+
+    def test_teto_por_minuto(self):
+        e = self._chamar("Rate limit reached for model `openai/gpt-oss-120b` "
+                         "on tokens per minute (TPM): Limit 8000, Used 7900")
+        self.assertFalse(e.diaria)
+
+
 if __name__ == "__main__":
     unittest.main()
