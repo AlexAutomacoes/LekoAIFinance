@@ -344,7 +344,9 @@ class TestEdicao(BaseBot):
     def test_ia_pede_dados_e_a_edicao_continua_aberta(self):
         self.ia({"acao": "pedir_dados", "mensagem": "Qual o valor?"})
         r = self.msg("mercado")
-        self.assertEqual(r, ["Qual o valor?"])
+        # Na edição a pergunta é sempre a nossa: a da IA costuma ser a padrão de
+        # registro ("me conta tudo"), que é justamente o que não queremos aqui.
+        self.assertEqual(r, [mh.MSG_PECA_DE_NOVO])
         self.p["atualizar_lancamento"].assert_not_called()
         self.p["salvar_edicao"].assert_not_called()
 
@@ -975,6 +977,32 @@ class TestEdicaoParcial(BaseBot):
         self.assertEqual(self.msg("40 reais"), [mh.MSG_LANCAMENTO_SUMIU])
         self.p["extract_transaction"].assert_not_called()
         self.p["salvar_edicao"].assert_called_once_with(7, None)
+
+
+class TestValorSoltoNaEdicao(BaseBot):
+    """IA pediu dados no meio da edição, mas a mensagem era só um valor."""
+
+    def setUp(self):
+        super().setUp()
+        self.row = usuario(edicao_gasto_id=42, edicao_iniciada_em=AGORA.isoformat())
+        self.ia({"acao": "pedir_dados", "mensagem": "Beleza! Para registrar, me conta 👇"})
+
+    def test_leitura_do_valor(self):
+        casos = {"20 reiais": 20.0, "R$ 35,90": 35.9, "R$35": 35.0, "1.234,56 conto": 1234.56,
+                 "35.90": 35.9, "1.500": 1500.0, "40": 40.0, "foi 12,5": 12.5,
+                 "dia 20/11": None, "de 10 para 20": None, "muda isso": None, "0": None,
+                 "foram 20 no mercado e não 10": None, "gastei 20 no mercado ontem à noite": None}
+        for texto, esperado in casos.items():
+            self.assertEqual(mh._valor_solto(texto), esperado, texto)
+
+    def test_vinte_reiais_corrige_o_valor(self):
+        r = self.msg("20 reiais")
+        self.assertEqual(self.p["atualizar_lancamento"].call_args.kwargs["valor"], -20.0)
+        self.assertIn("corrigido", r[0]["mensagem"])
+
+    def test_sem_valor_pede_de_novo_sem_a_mensagem_padrao_de_registro(self):
+        self.assertEqual(self.msg("muda isso"), [mh.MSG_PECA_DE_NOVO])
+        self.p["atualizar_lancamento"].assert_not_called()
 
 
 if __name__ == "__main__":
