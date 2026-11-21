@@ -51,6 +51,10 @@ REGISTRO = {"acao": "registrar", "mensagem": "Registrei sua transação ✅",
                           "descricao": "mercado", "data": "2026-10-29"}}
 
 
+# Botões que aparecem embaixo da confirmação do registro (id 99 = dublê).
+BOTOES_99 = [[{"texto": "✏️ Editar", "dados": "g|edit|99"},
+              {"texto": "🗑️ Excluir", "dados": "g|del|99"}]]
+
 CATEGORIAS = [{"id": 1, "nome": "Alimentação", "padrao": True},
               {"id": 2, "nome": "Lazer", "padrao": True},
               {"id": 3, "nome": "Outros", "padrao": True},
@@ -67,7 +71,7 @@ class BaseBot(unittest.TestCase):
         for nome, valor in {
             "get_or_create_user_row": None,
             "extract_transaction": None,
-            "insert_transaction": True,
+            "insert_transaction": 99,  # id do lançamento criado
             "contar_lancamentos_mes": 0,
             "listar_ultimos_lancamentos": [GASTO],
             "get_lancamento": GASTO,
@@ -125,16 +129,20 @@ class TestRegressao(BaseBot):
 
     def test_start_mostra_boas_vindas_com_comandos_novos(self):
         r = self.msg("/start")
-        self.assertIn("/lancamentos", r[0])
-        self.assertIn("/manual", r[0])
+        self.assertIn("meus lançamentos", r[0])
+        self.assertIn('"manual"', r[0])
         self.assertIn("/chamado", r[0])
+        self.assertIn("/assinaturas", r[0])
+        # Só /assinaturas e /chamado aparecem com barra para o usuário.
+        for cmd in ("/lancamentos", "/manual", "/categorias", "/plano", "/cancelar"):
+            self.assertNotIn(cmd, r[0])
 
     def test_registrar_normal_insere_e_nao_edita(self):
         self.ia(REGISTRO)
         r = self.msg("gastei 45,50 no mercado")
         self.p["insert_transaction"].assert_called_once()
         self.p["atualizar_lancamento"].assert_not_called()
-        self.assertEqual(r, ["Registrei sua transação ✅"])
+        self.assertEqual(r, [{"tipo": "botoes", "mensagem": "Registrei sua transação ✅", "botoes": BOTOES_99}])
 
     def test_cota_do_gratis_continua_bloqueando(self):
         self.ia(REGISTRO)
@@ -283,7 +291,7 @@ class TestListaEClique(BaseBot):
         r = mh.tratar_clique_lancamento("g|edit|42", TG, "Ana")
         self.p["salvar_edicao"].assert_called_once_with(7, 42)
         self.assertIn("corrigido", r[0])
-        self.assertIn("/cancelar", r[0])
+        self.assertIn('"cancelar"', r[0])
 
     def test_editar_derruba_rascunho_de_chamado(self):
         self.row = usuario(chamado_etapa="problema", chamado_iniciado_em=AGORA.isoformat())
@@ -463,18 +471,19 @@ class TestCategoriasNaIA(BaseBot):
         r = self.msg("ração 80")
         self.assertEqual(self.p["insert_transaction"].call_args.kwargs["categoria"], "Pets Teste")
         # a confirmação mostra o que foi GRAVADO, não o que a IA escreveu
-        self.assertIn("Categoria: Pets Teste", r[0])
+        self.assertIn("Categoria: Pets Teste", r[0]["mensagem"])
 
     def test_confirmacao_bate_com_o_gravado_quando_vai_para_outros(self):
         self.ia({**REGISTRO, "mensagem": "Registrei ✅ • Categoria: Supermercado",
                  "transacao": {**REGISTRO["transacao"], "categoria": "Supermercado"}})
         r = self.msg("gastei 45,50 no mercado")
-        self.assertIn("Categoria: Outros", r[0])
-        self.assertNotIn("Supermercado", r[0])
+        self.assertIn("Categoria: Outros", r[0]["mensagem"])
+        self.assertNotIn("Supermercado", r[0]["mensagem"])
+        self.assertEqual(r[0]["botoes"], BOTOES_99)
 
     def test_categoria_ja_certa_mantem_a_mensagem_da_ia(self):
         self.ia(REGISTRO)  # categoria "Alimentação", que está na lista
-        self.assertEqual(self.msg("gastei 45,50 no mercado"), ["Registrei sua transação ✅"])
+        self.assertEqual(self.msg("gastei 45,50 no mercado"), [{"tipo": "botoes", "mensagem": "Registrei sua transação ✅", "botoes": BOTOES_99}])
 
     def test_categoria_com_caixa_diferente_vira_a_da_lista(self):
         self.ia({**REGISTRO, "transacao": {**REGISTRO["transacao"], "categoria": "  pets "}})
@@ -491,7 +500,7 @@ class TestCategoriasNaIA(BaseBot):
         self.p["listar_categorias"].side_effect = RuntimeError("banco fora")
         self.ia(REGISTRO)
         r = self.msg("gastei 45,50 no mercado")
-        self.assertEqual(r, ["Registrei sua transação ✅"])
+        self.assertEqual(r, [{"tipo": "botoes", "mensagem": "Registrei sua transação ✅", "botoes": BOTOES_99}])
         self.assertIsNone(self.p["extract_transaction"].call_args.args[1])
 
 
@@ -823,6 +832,84 @@ class TestTelegramApi(unittest.TestCase):
         doc.assert_not_called()
         self.assertEqual(len(self.enviados), 1)  # só o texto
 
+
+# ---------------------------------------------------------------------------
+# Novo: botões no registro e comandos sem "/" (só /assinaturas e /chamado)
+# ---------------------------------------------------------------------------
+class TestBotoesERegistroSemBarra(BaseBot):
+
+    def test_registro_vem_com_editar_e_excluir_do_lancamento_criado(self):
+        self.ia(REGISTRO)
+        r = self.msg("gastei 45,50 no mercado")
+        self.assertEqual(r[0]["tipo"], "botoes")
+        self.assertEqual(r[0]["botoes"], BOTOES_99)
+
+    def test_botao_do_registro_cai_no_fluxo_da_lista(self):
+        # O clique em Excluir embaixo do registro é o mesmo g|del da lista.
+        r = mh.tratar_clique_lancamento("g|del|42", TG, "Ana")
+        self.assertIn("Tem certeza", r[0]["mensagem"])
+
+    def test_falha_ao_gravar_nao_manda_botao(self):
+        self.ia(REGISTRO)
+        self.p["insert_transaction"].return_value = None
+        self.assertEqual(self.msg("gastei 45,50 no mercado"), ["Falha ao salvar no banco de dados."])
+
+    def test_atalhos_em_texto_nao_chamam_a_ia(self):
+        casos = {"Meus lançamentos": "botoes", "minhas categorias": "botoes",
+                 "Manual": "documento", "meu plano.": None}
+        for texto, tipo in casos.items():
+            r = self.msg(texto)
+            if tipo:
+                self.assertEqual(r[0]["tipo"], tipo, texto)
+            else:
+                self.assertIn("Seu plano", r[0], texto)
+        self.p["extract_transaction"].assert_not_called()
+
+    def test_cancelar_em_texto_cancela_a_edicao(self):
+        self.row = usuario(edicao_gasto_id=42, edicao_iniciada_em=AGORA.isoformat())
+        r = self.msg("Cancelar")
+        self.assertIn("edição cancelada", r[0])
+        self.p["extract_transaction"].assert_not_called()
+        self.p["atualizar_lancamento"].assert_not_called()
+
+    def test_cancelar_em_texto_cancela_o_chamado(self):
+        self.row = usuario(chamado_etapa="problema", chamado_iniciado_em=AGORA.isoformat())
+        self.assertIn("chamado cancelado", self.msg("cancelar")[0])
+
+    def test_frase_com_atalho_no_meio_vai_para_a_ia(self):
+        self.ia({"acao": "conversar", "mensagem": "oi"})
+        self.msg("quero cancelar minha assinatura")
+        self.p["extract_transaction"].assert_called_once()
+
+    def test_acao_abrir_da_ia(self):
+        self.ia({"acao": "abrir", "tela": "categorias", "mensagem": "Claro!"})
+        self.assertEqual(self.msg("quero ver as categorias que eu tenho")[0]["tipo"], "botoes")
+        self.ia({"acao": "abrir", "tela": "manual", "mensagem": "Claro!"})
+        self.assertEqual(self.msg("como eu uso esse bot?")[0]["tipo"], "documento")
+        self.ia({"acao": "abrir", "tela": "plano", "mensagem": "Claro!"})
+        self.assertIn("Seu plano", self.msg("qual é o meu plano atual?")[0])
+        self.ia({"acao": "abrir", "tela": "inventada", "mensagem": "Hmm"})
+        self.assertEqual(self.msg("abre a tela x"), ["Hmm"])
+
+    def test_comandos_antigos_continuam_funcionando_escondidos(self):
+        self.assertEqual(self.msg("/lancamentos")[0]["tipo"], "botoes")
+        self.assertEqual(self.msg("/categorias")[0]["tipo"], "botoes")
+        self.assertEqual(self.msg("/manual")[0]["tipo"], "documento")
+
+    def test_respostas_do_bot_nao_citam_comandos_escondidos(self):
+        # Varre os textos do código: nenhuma mensagem ao usuário pode mandar a
+        # pessoa usar um comando que saiu do menu. Ficam de fora as docstrings
+        # e os próprios nomes dos comandos (ATALHOS, startswith).
+        import ast
+        arvore = ast.parse(open(mh.__file__, encoding="utf-8").read())
+        docstrings = {id(n.body[0].value) for n in ast.walk(arvore)
+                      if isinstance(n, (ast.Module, ast.FunctionDef)) and n.body
+                      and isinstance(n.body[0], ast.Expr)}
+        for no in ast.walk(arvore):
+            if (isinstance(no, ast.Constant) and isinstance(no.value, str)
+                    and id(no) not in docstrings and not no.value.startswith("/")):
+                for cmd in ("/lancamentos", "/categorias", "/manual", "/plano", "/cancelar"):
+                    self.assertNotIn(cmd, no.value, f"linha {no.lineno}")
 
 if __name__ == "__main__":
     unittest.main()
