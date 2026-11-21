@@ -43,7 +43,7 @@ from tools.db_manager import (
     apagar_importados,
     CATEGORIA_RESERVA,
 )
-from tools.llm_router import extract_transaction, generate_financial_tips
+from tools.llm_router import LimiteIA, extract_transaction, generate_financial_tips
 from tools.pdf_report import gerar_pdf_relatorio
 from tools.subscription import (
     check_access, 
@@ -107,6 +107,32 @@ LIMITE_LISTA_LANCAMENTOS = 10
 CAMINHO_MANUAL = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "assets", "Guia-do-Usuario-LekoAI-Finance.pdf")
 
+# --- Cota da IA esgotada ---------------------------------------------------------
+# A conta gratuita da Groq tem teto por minuto e por dia, compartilhado por todos
+# os usuários. Quando estoura, a pessoa precisa saber que NADA foi registrado —
+# senão acha que o lançamento entrou.
+MSG_LIMITE_DIA = ("⏳ Estamos com muita procura e chegamos ao limite de hoje.\n\n"
+                  "Sua mensagem NÃO foi registrada. Tente de novo mais tarde, por favor. 🙏")
+MSG_LIMITE_MINUTO = ("⏳ Muitas mensagens ao mesmo tempo.\n\n"
+                     "Sua mensagem NÃO foi registrada. Espere 1 minutinho e mande de novo, por favor. 🙏")
+MSG_DICAS_SEM_COTA = "As dicas financeiras ficaram indisponíveis agora — o relatório acima está completo. 🙂"
+
+
+def _aviso_limite(e: LimiteIA) -> str:
+    return MSG_LIMITE_DIA if e.diaria else MSG_LIMITE_MINUTO
+
+
+def _dicas(transacoes: list) -> str:
+    """
+    Dicas da IA para o relatório. O relatório vem do banco, não da IA: sem cota,
+    ele sai do mesmo jeito, só sem as dicas — em vez de a pessoa ficar sem nada.
+    """
+    try:
+        return f"Dicas financeiras para você:\n\n{generate_financial_tips(transacoes)}"
+    except LimiteIA:
+        return MSG_DICAS_SEM_COTA
+
+
 def gerar_relatorio_por_formato(user_id: int, first_name: str, data_inicio: str, data_fim: str, formato: str) -> list:
     """
     Gera o relatório no formato especificado ('pdf' ou 'excel') para o período.
@@ -123,7 +149,7 @@ def gerar_relatorio_por_formato(user_id: int, first_name: str, data_inicio: str,
     if not transacoes:
         return [f"Nenhuma transação encontrada no período de {data_inicio} a {data_fim}."]
 
-    dicas = generate_financial_tips(transacoes)
+    dicas = _dicas(transacoes)
 
     if formato == "excel":
         from tools.excel_report import gerar_excel_relatorio
@@ -140,7 +166,7 @@ def gerar_relatorio_por_formato(user_id: int, first_name: str, data_inicio: str,
             "caminho": caminho_file,
             "legenda": legenda,
         },
-        f"Dicas financeiras para você:\n\n{dicas}",
+        dicas,
     ]
 
 
@@ -1421,13 +1447,15 @@ def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dic
                     }
                 ]
 
-            dicas = generate_financial_tips(transacoes)
             relatorio_texto = _build_report(transacoes, data_inicio, data_fim)
-            return [relatorio_texto, f"Dicas financeiras para voce:\n\n{dicas}"]
+            return [relatorio_texto, _dicas(transacoes)]
 
         else:
             return ["A IA retornou uma acao desconhecida."]
 
+    except LimiteIA as e:
+        # Já foi para o log em llm_router; aqui só avisa a pessoa com clareza.
+        return [_aviso_limite(e)]
     except Exception as e:
         logging.error(f"Erro ao processar mensagem: {e}", exc_info=True)
         return ["Ocorreu um erro interno ao tentar entender sua mensagem. Tente novamente."]

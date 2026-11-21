@@ -3,7 +3,7 @@ import json
 import logging
 from collections import defaultdict
 from dotenv import load_dotenv
-from groq import Groq
+from groq import Groq, RateLimitError
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -16,6 +16,33 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 # Modelo da Groq usado em todas as chamadas. Centralizado aqui para facilitar troca
 # quando a Groq descontinua um modelo (ex.: o antigo "llama-3.3-70b-versatile" foi removido).
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+
+class LimiteIA(Exception):
+    """
+    A Groq recusou a chamada por cota (HTTP 429). Não é falha do usuário nem do
+    código: quem chama deve avisar com clareza, em vez do "erro interno"
+    genérico — que faz a pessoa repetir a mensagem e gastar ainda mais cota.
+
+    `diaria=True` é o teto do dia (tokens/requisições por dia), que demora a
+    liberar; `False` é o teto por minuto, que passa sozinho em instantes.
+    """
+    def __init__(self, diaria: bool, detalhe: str = ""):
+        super().__init__(detalhe)
+        self.diaria = diaria
+
+
+def _chamar_groq(client, **kwargs):
+    """Faz a chamada e traduz o 429 da Groq para LimiteIA (detalhe de fornecedor fica aqui)."""
+    try:
+        return client.chat.completions.create(**kwargs)
+    except RateLimitError as e:
+        # A Groq diz no texto do erro qual limite estourou, ex.:
+        # "... on tokens per day (TPD): Limit 200000 ..." ou "... per minute (TPM) ...".
+        detalhe = str(e)
+        diaria = "per day" in detalhe.lower()
+        logging.warning("Groq sem cota (%s): %s", "diária" if diaria else "por minuto", detalhe)
+        raise LimiteIA(diaria, detalhe) from e
+
 
 def _get_client():
     """Retorna uma instância do cliente Groq."""
@@ -168,7 +195,8 @@ Use quando o usuário quiser ver/mexer nas CATEGORIAS ("categorias"), saber o PL
     if editando:
         system_prompt += _prompt_modo_edicao(editando)
 
-    response = client.chat.completions.create(
+    response = _chamar_groq(
+        client,
         messages=[
             {
                 "role": "system",
@@ -319,7 +347,8 @@ Formato exato:
 
 Responda em texto simples, NÃO retorne JSON."""
 
-    response = client.chat.completions.create(
+    response = _chamar_groq(
+        client,
         messages=[
             {
                 "role": "system",
