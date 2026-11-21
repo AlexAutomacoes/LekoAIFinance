@@ -276,17 +276,30 @@ Stripe reenvia o evento se não receber 2xx rápido.
 
 ## 7. Comandos do bot
 
-| Comando | O que faz |
-| :--- | :--- |
-| `/start` | cadastra/saúda. Com deep link `q_<uuid>` vincula o quiz do parceiro |
-| `/plano` | mostra o plano atual e o uso do mês |
-| `/assinaturas` | mostra os botões dos planos pagos (`/assinar` continua valendo) |
-| `/chamado` | abre chamado em 2 perguntas (problema → esperado). Só plano pago |
-| `/cancelar` | cancela o rascunho de chamado, a edição de lançamento ou o nome de categoria em andamento |
-| `/lancamentos` | últimos 10 lançamentos em botões → editar ou excluir. Todos os planos, sem paywall |
-| `/manual` | envia o Guia do Usuário em PDF (`tools/assets/`) |
-| `/categorias` | lista as categorias em botões (`c|...`): criar, renomear, excluir |
-| `/dev` | **só admin** — simula estados de plano para teste |
+**Para o usuário, só dois comandos têm "/": `/assinaturas` e `/chamado`** (são os únicos no
+menu do BotFather e nas mensagens do bot). O resto é pedido em português. Os comandos
+antigos continuam funcionando **escondidos** — quem tem o hábito não quebra — mas nenhum texto
+do bot pode citá-los (`tests/test_bot.py` varre o código e falha se citar).
+
+| O usuário diz | Vira | O que faz |
+| :--- | :--- | :--- |
+| `/start` | — | cadastra/saúda. Com deep link `q_<uuid>` vincula o quiz do parceiro |
+| `/assinaturas` | — | mostra os botões dos planos pagos (`/assinar` continua valendo) |
+| `/chamado` | — | abre chamado em 2 perguntas (problema → esperado). Só plano pago |
+| "cancelar" | `/cancelar` | cancela o rascunho de chamado, a edição de lançamento ou o nome de categoria em andamento |
+| "meus lançamentos" | `/lancamentos` | últimos 10 lançamentos em botões → editar ou excluir. Todos os planos, sem paywall |
+| "minhas categorias" | `/categorias` | lista as categorias em botões (`c|...`): criar, renomear, excluir |
+| "meu plano" | `/plano` | mostra o plano atual e o uso do mês |
+| "manual" | `/manual` | envia o Guia do Usuário em PDF (`tools/assets/`) |
+| — | `/dev` | **só admin** — simula estados de plano para teste |
+
+A frase **exata** (ignorando maiúsculas e pontuação no fim) vira o comando escondido sem passar
+pela IA — tabela `ATALHOS` em `message_handler.py`. Variações ("quero ver minhas categorias")
+vão para a IA, que devolve `gerenciar` ou `abrir` (ver seção 8).
+
+**Todo registro vem com botões ✏️ Editar / 🗑️ Excluir** embaixo da confirmação
+(`_com_botoes_lancamento`). São os mesmos `g|edit|<id>` / `g|del|<id>` da lista, por isso
+`db_manager.insert_transaction` devolve o **id** do lançamento criado (ou `None`), não um bool.
 
 Qualquer outra mensagem vai para a Camada 2 (IA).
 
@@ -315,7 +328,9 @@ ouro do módulo: *nada ali pode derrubar o `/start`* — qualquer falha vira log
 
 `extract_transaction` roda com **JSON Mode** (`response_format={"type": "json_object"}`)
 e `temperature=0.0` — blindagem contra erro de parse e markdown no meio do JSON.
-Devolve uma das 6 ações: `conversar`, `pedir_dados`, `registrar`, `pedir_periodo`, `relatorio`, `gerenciar`.
+Devolve uma das 7 ações: `conversar`, `pedir_dados`, `registrar`, `pedir_periodo`, `relatorio`, `gerenciar`, `abrir`.
+
+`abrir` traz `tela`: `categorias` | `plano` | `manual` — as telas que antes eram comandos com "/".
 
 `gerenciar` só **mostra a lista** de lançamentos: quem edita ou apaga é sempre um clique
 num botão (`g|...`, ver `message_handler.tratar_clique_lancamento`). Toda leitura e escrita

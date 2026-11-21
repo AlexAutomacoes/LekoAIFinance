@@ -78,9 +78,11 @@ def get_or_create_user(telegram_id: int, name: str) -> int:
     
 #     raise Exception("Falha ao criar novo usuário no Supabase.")
 
-def insert_transaction(user_id: int, status: str, valor: float, categoria: str, descricao: str, data: str) -> bool:
+def insert_transaction(user_id: int, status: str, valor: float, categoria: str, descricao: str, data: str):
     """
     Insere uma nova transação na tabela gastos.
+    Devolve o id do lançamento criado (ou None se falhou): é ele que vai nos
+    botões Editar/Excluir que aparecem embaixo da confirmação do registro.
     """
     transaction = {
         "user_id": user_id,
@@ -93,7 +95,9 @@ def insert_transaction(user_id: int, status: str, valor: float, categoria: str, 
     }
 
     response = _get_client().table("gastos").insert(transaction).execute()
-    return len(response.data) > 0
+    if not response.data:
+        return None
+    return response.data[0].get("id")
 
 def get_transactions(user_id: int, data_inicio: str, data_fim: str) -> list:
     """

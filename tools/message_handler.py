@@ -67,13 +67,28 @@ from tools import extrato
 LIMITE_DIAS_PDF = 7
 FUSO_SP = ZoneInfo("America/Sao_Paulo")
 
+# --- Atalhos em texto puro ----------------------------------------------------
+# Para o usuário, os únicos comandos com "/" são /assinaturas e /chamado. O
+# resto é pedido em português — e estas frases exatas viram o comando antigo
+# (que continua funcionando escondido) sem passar pela IA: mais rápido, sem
+# custo de token e sem risco de a IA errar a intenção. Variações ("quero ver
+# minhas categorias") caem na IA, ação "abrir" / "gerenciar".
+ATALHOS = {
+    "cancelar": "/cancelar", "cancela": "/cancelar", "desistir": "/cancelar",
+    "meus lançamentos": "/lancamentos", "meus lancamentos": "/lancamentos",
+    "lançamentos": "/lancamentos", "lancamentos": "/lancamentos",
+    "minhas categorias": "/categorias", "categorias": "/categorias",
+    "meu plano": "/plano", "plano": "/plano",
+    "manual": "/manual",
+}
+
 # --- /chamado ----------------------------------------------------------------
 # Rascunho abandonado expira: se a pessoa some no meio e volta amanhã, a mensagem
 # dela volta a ser uma mensagem normal — e não vira o texto de um chamado.
 CHAMADO_EXPIRA_MIN = 30
 PERGUNTA_PROBLEMA = ("🛠️ Vamos abrir um chamado.\n\n"
                      "1/2 — Qual o problema ocorrido?\n\n"
-                     "(Para desistir, é só mandar /cancelar.)")
+                     "(Para desistir, é só mandar \"cancelar\".)")
 PERGUNTA_ESPERADO = "2/2 — Como o sistema deveria se comportar?"
 TAMANHO_MINIMO_RESPOSTA = 5
 
@@ -134,9 +149,12 @@ def _build_welcome(name: str, internal_id: int) -> str:
         f"É só me mandar coisas como \"gastei 50 no mercado\" ou \"recebi 2000 de salário\" que eu "
         f"registro tudo automaticamente. Quando quiser, é só pedir um relatório. 📊\n\n"
         f"🆓 No plano Grátis: 20 lançamentos por mês + relatórios de até 7 dias.\n\n"
-        f"✏️ Errou um lançamento? /lancamentos para corrigir ou excluir.\n"
-        f"🏷️ Suas categorias: /categorias para criar, renomear ou excluir.\n"
-        f"📘 Manual completo, passo a passo: /manual\n"
+        f"✏️ Errou um lançamento? Toque em Editar ou Excluir logo abaixo dele "
+        f"(ou me peça \"meus lançamentos\").\n"
+        f"🏷️ Para criar, renomear ou excluir categorias, me peça \"minhas categorias\".\n"
+        f"📋 Seu plano e o uso do mês: é só pedir \"meu plano\".\n"
+        f"📘 Manual completo, passo a passo: me peça o \"manual\".\n"
+        f"⭐ Conhecer os planos pagos: /assinaturas\n"
         f"🛠️ Nos planos pagos você ainda abre chamado direto com a equipe: /chamado\n"
         f"📎 E pode me mandar o extrato do banco (arquivo .ofx) para eu lançar tudo de uma vez."
     )
@@ -323,7 +341,7 @@ def _handle_dev(text: str, telegram_id: int, first_name: str) -> list:
             aplicar_plano(row["id"], "lifetime", None)
         else:
             return [f"Valor desconhecido: '{alvo}'. Use: free | plus | plus_vencido | lifetime."]
-        return [f"✅ Plano definido para '{alvo}'. Rode /plano para conferir."]
+        return [f"✅ Plano definido para '{alvo}'. Mande \"meu plano\" para conferir."]
 
     return ["Uso:\n/dev plano <free|plus|plus_vencido|lifetime>\n/dev status"]
 
@@ -403,7 +421,7 @@ def _msg_bloqueio(verdict) -> list:
     if verdict.motivo == MOTIVO_LIMITE_CATEGORIAS:
         limite = verdict.meta.get("limite", LIMITE_CATEGORIAS_FREE)
         return [_menu_planos(f"⛔ No plano Grátis dá para criar até {limite} categorias próprias.\n"
-                             "Você ainda pode renomear ou excluir as que já tem (/categorias).\n\n"
+                             "Você ainda pode renomear ou excluir as que já tem (peça \"minhas categorias\").\n\n"
                              "🚀 Faça o upgrade para criar quantas quiser:")]
     if verdict.motivo == MOTIVO_SO_PAGO and verdict.meta.get("acao") == ACAO_IMPORTAR_EXTRATO:
         return [_menu_planos("⛔ Importar extrato bancário é um benefício dos planos pagos.\n\n"
@@ -527,6 +545,16 @@ def _lista_lancamentos(user_id: int, mensagem: str) -> list:
     return [{"tipo": "botoes", "mensagem": mensagem, "botoes": linhas}]
 
 
+def _com_botoes_lancamento(mensagem: str, gasto_id: int) -> dict:
+    """Confirmação do registro já com Editar/Excluir embaixo: corrigir um erro
+    da IA fica a um toque, sem abrir a lista e procurar o item. Os botões são
+    os mesmos da lista (g|...), então o fluxo — e a checagem de que o
+    lançamento é de quem clicou — é o mesmo."""
+    return {"tipo": "botoes", "mensagem": mensagem,
+            "botoes": [[{"texto": "✏️ Editar", "dados": f"g|edit|{gasto_id}"},
+                        {"texto": "🗑️ Excluir", "dados": f"g|del|{gasto_id}"}]]}
+
+
 MSG_LISTA = (f"🧾 Seus últimos {LIMITE_LISTA_LANCAMENTOS} lançamentos.\n"
              "Toque no que você quer corrigir ou excluir 👇")
 
@@ -544,7 +572,7 @@ def tratar_clique_lancamento(data: str, telegram_id: int, first_name: str) -> li
     try:
         gasto_id = int(partes[2])
     except (IndexError, ValueError):
-        return ["Não entendi esse botão. Mande /lancamentos para ver a lista de novo."]
+        return ["Não entendi esse botão. Me peça \"meus lançamentos\" para ver a lista de novo."]
 
     # Lê do banco filtrando pelo dono: um id forjado de outra pessoa cai aqui
     # como "não encontrado", igual a um lançamento que já foi apagado.
@@ -579,7 +607,7 @@ def tratar_clique_lancamento(data: str, telegram_id: int, first_name: str) -> li
         # Se ele estava editando justamente este, a edição não tem mais alvo.
         if row.get("edicao_gasto_id") == gasto_id:
             salvar_edicao(user_id, None)
-        return ["🗑️ Lançamento excluído.\n\nQuer mexer em mais algum? /lancamentos"]
+        return ["🗑️ Lançamento excluído.\n\nQuer mexer em mais algum? É só pedir \"meus lançamentos\"."]
 
     if acao == "edit":
         # Um /chamado pela metade e uma edição ao mesmo tempo disputariam a
@@ -597,15 +625,15 @@ def tratar_clique_lancamento(data: str, telegram_id: int, first_name: str) -> li
                  "Inclua a data se não for hoje, ex.:\n"
                  "\"gastei 45 no mercado dia 28/10\"\n\n"
                  f"Ele vai substituir este:\n{_detalhe_lancamento(g)}\n\n"
-                 "(Para desistir, é só mandar /cancelar.)")]
+                 "(Para desistir, é só mandar \"cancelar\".)")]
 
-    return ["Não entendi esse botão. Mande /lancamentos para ver a lista de novo."]
+    return ["Não entendi esse botão. Me peça \"meus lançamentos\" para ver a lista de novo."]
 
 
 MSG_SAIU_DA_EDICAO = ("ℹ️ Saí da edição do lançamento — ele continua como estava. "
-                      "Para corrigir, toque em Editar de novo (/lancamentos).")
+                      "Para corrigir, toque em Editar de novo (ou peça \"meus lançamentos\").")
 MSG_PECA_DE_NOVO = ("Não consegui entender a correção. 🤔 Me mande o lançamento completo, "
-                    "ex.: \"gastei 45 no mercado dia 28/10\" — ou /cancelar para desistir.")
+                    "ex.: \"gastei 45 no mercado dia 28/10\" — ou \"cancelar\" para desistir.")
 
 
 def _correcao_valida(t: dict):
@@ -765,24 +793,24 @@ def tratar_clique_categoria(data: str, telegram_id: int, first_name: str) -> lis
     if acao == "nova":
         if len(listar_categorias(user_id)) >= LIMITE_TOTAL_CATEGORIAS:
             return [f"Você já tem {LIMITE_TOTAL_CATEGORIAS} categorias, o máximo. "
-                    "Exclua ou junte algumas antes de criar outra (/categorias)."]
+                    "Exclua ou junte algumas antes de criar outra (peça \"minhas categorias\")."]
         bloqueio = _gate(row, ACAO_CRIAR_CATEGORIA, "criar-categoria",
                          categorias_proprias=contar_categorias_proprias(user_id))
         if bloqueio:
             return bloqueio
         aviso = _abrir_conversa_categoria(row, "nova")
         return aviso + ["🏷️ Qual o nome da nova categoria? (ex.: Pets, Academia, Presentes)\n\n"
-                        "(Para desistir, é só mandar /cancelar.)"]
+                        "(Para desistir, é só mandar \"cancelar\".)"]
 
     try:
         cat_id = int(partes[2])
     except (IndexError, ValueError):
-        return ["Não entendi esse botão. Mande /categorias para ver a lista de novo."]
+        return ["Não entendi esse botão. Me peça \"minhas categorias\" para ver a lista de novo."]
 
     # Filtra pelo dono: id forjado de outra pessoa = "não encontrada".
     cat = get_categoria(user_id, cat_id)
     if cat is None:
-        return ["🤔 Não encontrei essa categoria — talvez ela já tenha sido excluída. /categorias"]
+        return ["🤔 Não encontrei essa categoria — talvez ela já tenha sido excluída. Peça \"minhas categorias\" para ver a lista."]
 
     if _eh_reserva(cat) and acao in ("ver", "ren", "del", "delok"):
         return [{"tipo": "botoes",
@@ -805,7 +833,7 @@ def tratar_clique_categoria(data: str, telegram_id: int, first_name: str) -> lis
         return aviso + [f"✏️ Qual o novo nome para \"{cat['nome']}\"?\n"
                         "Os lançamentos dela passam para o nome novo. Se você usar o nome de "
                         "outra categoria que já existe, as duas viram uma só.\n\n"
-                        "(Para desistir, é só mandar /cancelar.)"]
+                        "(Para desistir, é só mandar \"cancelar\".)"]
 
     if acao == "del":
         n = contar_lancamentos_categoria(user_id, cat["nome"])
@@ -818,11 +846,11 @@ def tratar_clique_categoria(data: str, telegram_id: int, first_name: str) -> lis
     if acao == "delok":
         movidos = excluir_categoria(user_id, cat_id)
         if movidos is None:
-            return ["🤔 Essa categoria já não existe. /categorias"]
+            return ["🤔 Essa categoria já não existe. Peça \"minhas categorias\" para ver a lista."]
         extra = f" {movidos} lançamento(s) foram para \"{CATEGORIA_RESERVA}\"." if movidos else ""
         return _lista_categorias(user_id, f"🗑️ Categoria \"{cat['nome']}\" excluída.{extra}")
 
-    return ["Não entendi esse botão. Mande /categorias para ver a lista de novo."]
+    return ["Não entendi esse botão. Me peça \"minhas categorias\" para ver a lista de novo."]
 
 
 def _nome_valido(texto: str):
@@ -842,7 +870,7 @@ def _responder_nome_categoria(user_row, texto: str) -> list:
     if nome is None:
         minimo, maximo = TAMANHO_NOME_CATEGORIA
         return [f"Esse nome não serve 🤔 Use de {minimo} a {maximo} caracteres, com pelo menos "
-                "uma letra. Mande de novo, ou /cancelar para desistir."]
+                "uma letra. Mande de novo, ou \"cancelar\" para desistir."]
 
     salvar_etapa_categoria(user_id, None)
 
@@ -862,11 +890,11 @@ def _responder_nome_categoria(user_row, texto: str) -> list:
         try:
             cat_id = int(etapa.split(":", 1)[1])
         except ValueError:
-            return ["Não consegui identificar a categoria. Mande /categorias e tente de novo."]
+            return ["Não consegui identificar a categoria. Peça \"minhas categorias\" e tente de novo."]
         antiga = get_categoria(user_id, cat_id)
         resultado, movidos = renomear_categoria(user_id, cat_id, nome)
         if resultado == "nao_encontrada" or antiga is None:
-            return ["🤔 Essa categoria já não existe. /categorias"]
+            return ["🤔 Essa categoria já não existe. Peça \"minhas categorias\" para ver a lista."]
         if resultado == "mesmo_nome":
             return _lista_categorias(user_id, "O nome é o mesmo, nada mudou. 🙂")
         extra = f" ({movidos} lançamento(s) atualizados)" if movidos else ""
@@ -875,7 +903,7 @@ def _responder_nome_categoria(user_row, texto: str) -> list:
                                               f"\"{nome}\"{extra}.")
         return _lista_categorias(user_id, f"✅ \"{antiga['nome']}\" agora se chama \"{nome}\"{extra}.")
 
-    return ["Não consegui identificar o que você estava fazendo. Mande /categorias de novo."]
+    return ["Não consegui identificar o que você estava fazendo. Peça \"minhas categorias\" de novo."]
 
 
 # --- Importar extrato bancário ---------------------------------------------------
@@ -950,7 +978,7 @@ def _resumo_previa(novas: list, repetidas: list, cartao: bool, internas: int = 0
         linhas += ["", "Saídas por categoria:"]
         linhas += [f"• {cat}: R$ {_fmt_moeda(v)}" for cat, v in maiores]
     linhas += ["", "Nada foi gravado ainda. Confira e toque em Importar. As categorias foram "
-                   "escolhidas pela descrição; dá para corrigir depois em /lancamentos."]
+                   "escolhidas pela descrição; dá para corrigir depois pedindo \"meus lançamentos\"."]
     return "\n".join(linhas)
 
 
@@ -1026,7 +1054,7 @@ def _importar(row, importacao_id: int, itens: list) -> list:
         return bloqueio
     # Trava contra clique duplo: só um update consegue sair de 'pendente'.
     if not trocar_status_importacao(user_id, importacao_id, "pendente", "importando"):
-        return ["⏳ Esse extrato já está sendo importado (ou já foi). Confira em /lancamentos."]
+        return ["⏳ Esse extrato já está sendo importado (ou já foi). Confira pedindo \"meus lançamentos\"."]
     try:
         # Confere de novo pelo id do banco: entre a prévia e o clique, outro
         # extrato do mesmo período pode ter sido importado.
@@ -1043,7 +1071,7 @@ def _importar(row, importacao_id: int, itens: list) -> list:
     trocar_status_importacao(user_id, importacao_id, "importando", "importada", limpar_itens=True)
     return [{"tipo": "botoes",
              "mensagem": (f"✅ Importei {n} lançamento(s)!\n\n"
-                          "Para ver ou corrigir algum: /lancamentos\n"
+                          "Para ver ou corrigir algum, me peça \"meus lançamentos\".\n"
                           "Se algo saiu errado, dá para desfazer a importação inteira:"),
              "botoes": [[{"texto": "↩️ Desfazer importação", "dados": f"x|undo|{importacao_id}"}]]}]
 
@@ -1067,9 +1095,9 @@ def tratar_clique_importacao(data: str, telegram_id: int, first_name: str) -> li
 
     if acao in ("ok", "ver", "no"):
         if status == "importada":
-            return ["✅ Esse extrato já foi importado. Confira em /lancamentos."]
+            return ["✅ Esse extrato já foi importado. Confira pedindo \"meus lançamentos\"."]
         if status == "importando":
-            return ["⏳ Já estou importando esse extrato. Confira em /lancamentos daqui a pouco."]
+            return ["⏳ Já estou importando esse extrato. Confira pedindo \"meus lançamentos\" daqui a pouco."]
         if status != "pendente":
             return ["Essa prévia foi cancelada. Para importar, mande o arquivo de novo. 📎"]
         if not _dentro_do_prazo(imp.get("created_at"), IMPORTACAO_EXPIRA_HORAS * 60):
@@ -1127,6 +1155,12 @@ def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dic
 
         texto = (text or "").strip()
         comando = texto.lower()
+        # Atalho em texto puro ("cancelar", "meu plano"...) vira o comando
+        # escondido equivalente. Dali para baixo tudo segue igual — inclusive
+        # a regra "um comando no meio de um fluxo desiste dele".
+        atalho = ATALHOS.get(comando.rstrip(".!? "))
+        if atalho:
+            texto = comando = atalho
 
         # --- Menu de entrada: escolher um plano antes de usar ------------------
         # Quem chega (pelo quiz ou pelo link direto) precisa escolher um plano —
@@ -1208,7 +1242,7 @@ def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dic
             return respostas
         
         # Comando /plano — mostra o plano atual e o uso do mês
-        if text and text.strip().lower().startswith("/plano"):
+        if comando.startswith("/plano"):
             return [_build_plano_msg(telegram_id, first_name)]
 
         # Comando /dev — só admin, simula estados de plano
@@ -1243,6 +1277,18 @@ def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dic
         elif acao == "gerenciar":
             return _lista_lancamentos(internal_id, dados.get("mensagem") or MSG_LISTA)
 
+        elif acao == "abrir":
+            # Pedido em português de uma tela que antes era comando com "/".
+            # Mesmas respostas dos comandos (sem paywall, como eles).
+            tela = dados.get("tela")
+            if tela == "categorias":
+                return _lista_categorias(internal_id)
+            if tela == "plano":
+                return [_build_plano_msg(telegram_id, first_name)]
+            if tela == "manual":
+                return resposta_manual()
+            return [dados.get("mensagem") or "Desculpe, não entendi. 🤔"]
+
         elif acao == "registrar":
             # Gate: no plano Grátis, até 20 lançamentos/mês.
             usados = contar_lancamentos_mes(internal_id)
@@ -1251,7 +1297,7 @@ def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dic
                 return bloqueio
 
             transacao = dados.get("transacao", {})
-            sucesso = insert_transaction(
+            gasto_id = insert_transaction(
                 user_id=internal_id,
                 status=transacao.get("status"),
                 valor=transacao.get("valor"),
@@ -1259,12 +1305,14 @@ def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dic
                 descricao=transacao.get("descricao"),
                 data=transacao.get("data"),
             )
-            if not sucesso:
+            if not gasto_id:
                 return ["Falha ao salvar no banco de dados."]
             if dados.get("categoria_corrigida"):
-                return [f"Registrei sua transação ✅\n\n{_detalhe_lancamento(transacao)}\n\n"
-                        "Quer registrar mais alguma coisa ou ver um relatório?"]
-            return [dados.get("mensagem", "Registrado com sucesso!")]
+                confirmacao = (f"Registrei sua transação ✅\n\n{_detalhe_lancamento(transacao)}\n\n"
+                               "Quer registrar mais alguma coisa ou ver um relatório?")
+            else:
+                confirmacao = dados.get("mensagem", "Registrado com sucesso!")
+            return [_com_botoes_lancamento(confirmacao, gasto_id)]
 
         elif acao == "relatorio":
             periodo = dados.get("periodo", {})
