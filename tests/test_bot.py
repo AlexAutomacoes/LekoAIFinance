@@ -290,7 +290,8 @@ class TestListaEClique(BaseBot):
     def test_editar_comeca_a_edicao(self):
         r = mh.tratar_clique_lancamento("g|edit|42", TG, "Ana")
         self.p["salvar_edicao"].assert_called_once_with(7, 42)
-        self.assertIn("corrigido", r[0])
+        self.assertIn("O que você quer mudar", r[0])
+        self.assertIn('"40 reais"', r[0])  # ensina a mandar só a correção
         self.assertIn('"cancelar"', r[0])
 
     def test_editar_derruba_rascunho_de_chamado(self):
@@ -298,7 +299,7 @@ class TestListaEClique(BaseBot):
         r = mh.tratar_clique_lancamento("g|edit|42", TG, "Ana")
         self.p["salvar_rascunho_chamado"].assert_called_once_with(7, None)
         self.assertIn("Cancelei o chamado", r[0])  # não some calado
-        self.assertIn("corrigido", r[1])
+        self.assertIn("O que você quer mudar", r[1])
 
     def test_editar_nao_avisa_de_chamado_ja_expirado(self):
         self.row = usuario(chamado_etapa="problema",
@@ -325,11 +326,13 @@ class TestEdicao(BaseBot):
         self.p["insert_transaction"].assert_not_called()
         self.p["contar_lancamentos_mes"].assert_not_called()  # corrigir não gasta cota
         self.p["salvar_edicao"].assert_called_once_with(7, None)
-        self.assertIn("corrigido", r[0])
-        self.assertIn("Antes era", r[0])
-        self.assertIn("R$ 50,00", r[0])   # o valor antigo aparece
-        self.assertIn("R$ 45,50", r[0])   # e o novo
-        self.assertNotIn("Registrei", r[0])
+        texto = r[0]["mensagem"]
+        self.assertIn("corrigido", texto)
+        self.assertIn("Antes era", texto)
+        self.assertIn("R$ 50,00", texto)   # o valor antigo aparece
+        self.assertIn("R$ 45,50", texto)   # e o novo
+        self.assertNotIn("Registrei", texto)
+        self.assertEqual(r[0]["botoes"][0][0]["dados"], "g|edit|42")  # volta com os botões
         self.p["extract_transaction"].assert_called_once()
 
     def test_edicao_funciona_mesmo_com_cota_estourada(self):
@@ -361,12 +364,10 @@ class TestEdicao(BaseBot):
 
     def test_correcao_com_dados_ruins_nao_sobrescreve(self):
         ruins = [
-            {"status": "Saída", "valor": None, "categoria": "X", "descricao": "", "data": "2026-10-29"},
             {"status": "Saída", "valor": "abc", "categoria": "X", "descricao": "", "data": "2026-10-29"},
             {"status": "Saída", "valor": 0, "categoria": "X", "descricao": "", "data": "2026-10-29"},
             {"status": "gasto", "valor": -5, "categoria": "X", "descricao": "", "data": "2026-10-29"},
             {"status": "Saída", "valor": -5, "categoria": "X", "descricao": "", "data": "2026-02-30"},
-            {"status": "Saída", "valor": -5, "categoria": "X", "descricao": "", "data": None},
             {},
         ]
         for t in ruins:
@@ -383,7 +384,7 @@ class TestEdicao(BaseBot):
         self.msg("gastei 45,50")
         kw = self.p["atualizar_lancamento"].call_args.kwargs
         self.assertEqual(kw["valor"], -45.5)
-        self.assertEqual(kw["categoria"], "Outros")
+        self.assertEqual(kw["categoria"], "Alimentação")  # sem categoria = não mudou
         self.ia({"acao": "registrar", "mensagem": "", "transacao": {
             "status": "Entrada", "valor": -100, "categoria": "Salário", "descricao": "", "data": "2026-10-29"}})
         self.msg("recebi 100")
@@ -910,6 +911,71 @@ class TestBotoesERegistroSemBarra(BaseBot):
                     and id(no) not in docstrings and not no.value.startswith("/")):
                 for cmd in ("/lancamentos", "/categorias", "/manual", "/plano", "/cancelar"):
                     self.assertNotIn(cmd, no.value, f"linha {no.lineno}")
+
+# ---------------------------------------------------------------------------
+# Novo: edição parcial — a pessoa manda só o que muda ("40 reais")
+# ---------------------------------------------------------------------------
+class TestEdicaoParcial(BaseBot):
+
+    def setUp(self):
+        super().setUp()
+        self.row = usuario(edicao_gasto_id=42, edicao_iniciada_em=AGORA.isoformat())
+
+    def corrige(self, campos, texto="x"):
+        self.ia({"acao": "corrigir", "campos": campos, "mensagem": ""})
+        return self.msg(texto)
+
+    def gravado(self):
+        return self.p["atualizar_lancamento"].call_args.kwargs
+
+    def test_so_o_valor_muda_o_resto_fica(self):
+        r = self.corrige({"valor": 40}, "40 reais")
+        self.assertEqual(self.gravado(), dict(
+            user_id=7, gasto_id=42, status="Saída", valor=-40.0,
+            categoria="Alimentação", descricao="mercado", data="2026-10-28"))
+        self.assertIn("R$ 40,00", r[0]["mensagem"])
+
+    def test_a_ia_recebe_o_lancamento_que_esta_sendo_editado(self):
+        self.corrige({"valor": 40}, "40 reais")
+        self.assertEqual(self.p["extract_transaction"].call_args.args[2], GASTO)
+
+    def test_era_entrada_inverte_o_sinal(self):
+        self.corrige({"status": "Entrada"}, "era entrada")
+        self.assertEqual(self.gravado()["valor"], 50.0)
+        self.assertEqual(self.gravado()["status"], "Entrada")
+
+    def test_valor_negativo_da_ia_nao_vira_entrada(self):
+        self.corrige({"valor": -40})
+        self.assertEqual(self.gravado()["valor"], -40.0)
+
+    def test_so_a_data(self):
+        self.corrige({"data": "2026-11-20"}, "foi dia 20/11")
+        self.assertEqual(self.gravado()["data"], "2026-11-20")
+        self.assertEqual(self.gravado()["valor"], -50.0)
+
+    def test_categoria_passa_pela_lista_do_usuario(self):
+        self.corrige({"categoria": "lazer"}, "categoria lazer")
+        self.assertEqual(self.gravado()["categoria"], "Lazer")
+        self.corrige({"categoria": "Inventada"})
+        self.assertEqual(self.gravado()["categoria"], "Outros")
+
+    def test_nada_mudou_ou_invalido_continua_editando(self):
+        for campos in ({}, {"valor": 50}, {"valor": "abc"}, {"valor": 0},
+                       {"data": "2026-02-30"}, {"status": "gasto"}, {"id": 99}):
+            self.assertEqual(self.corrige(campos), [mh.MSG_PECA_DE_NOVO], campos)
+        self.p["atualizar_lancamento"].assert_not_called()
+        self.p["salvar_edicao"].assert_not_called()
+
+    def test_campos_que_nao_sao_dict(self):
+        self.ia({"acao": "corrigir", "campos": "valor 40", "mensagem": ""})
+        self.assertEqual(self.msg("40"), [mh.MSG_PECA_DE_NOVO])
+
+    def test_lancamento_apagado_antes_de_chamar_a_ia(self):
+        self.p["get_lancamento"].return_value = None
+        self.assertEqual(self.msg("40 reais"), [mh.MSG_LANCAMENTO_SUMIU])
+        self.p["extract_transaction"].assert_not_called()
+        self.p["salvar_edicao"].assert_called_once_with(7, None)
+
 
 if __name__ == "__main__":
     unittest.main()

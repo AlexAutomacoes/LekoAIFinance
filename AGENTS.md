@@ -336,6 +336,14 @@ Devolve uma das 7 ações: `conversar`, `pedir_dados`, `registrar`, `pedir_perio
 num botão (`g|...`, ver `message_handler.tratar_clique_lancamento`). Toda leitura e escrita
 de lançamento filtra por `id` **e** `user_id` — o id vem do `callback_data`, que pode ser forjado.
 
+**Edição é parcial.** Depois do clique em Editar, a próxima mensagem vai para a IA com o
+lançamento atual no prompt (`extract_transaction(..., editando=lancamento)` liga o "modo edição",
+só nessa chamada). Ela devolve a 8ª ação, `corrigir`, com `campos` = **só o que mudou**
+(`"40 reais"` → `{"valor": 40}`). Quem junta com o resto, valida e acerta o sinal é o código
+(`message_handler._mesclar_correcao`). Correção inválida ou que não muda nada → a edição
+continua aberta e o bot pede de novo. Se a IA devolver `registrar` com o lançamento inteiro,
+serve de correção também.
+
 **Categorias:** `extract_transaction(texto, categorias)` recebe a lista do usuário e a
 IA deve escolher uma delas. Quem garante é o código (`message_handler._categoria_da_lista`):
 nome igual (ignorando maiúsculas) ou quase igual vira o da lista; o resto vira "Outros".

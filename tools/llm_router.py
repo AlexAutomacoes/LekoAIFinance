@@ -22,10 +22,11 @@ def _get_client():
         raise Exception("GROQ_API_KEY não configurada no .env")
     return Groq(api_key=GROQ_API_KEY)
 
-def extract_transaction(text: str, categorias: list | None = None) -> dict:
+def extract_transaction(text: str, categorias: list | None = None, editando: dict | None = None) -> dict:
     """
     Usa a API do Groq (Llama-3.3) para converter a linguagem natural em um JSON estruturado.
-    Suporta 7 ações: conversar, pedir_dados, registrar, pedir_periodo, relatorio, gerenciar, abrir.
+    Suporta 7 ações: conversar, pedir_dados, registrar, pedir_periodo, relatorio, gerenciar, abrir
+    — e, quando `editando` traz o lançamento que o usuário está corrigindo, a 8ª: corrigir.
     """
     client = _get_client()
     hoje = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m-%d")
@@ -138,6 +139,8 @@ Use quando o usuário quiser ver/mexer nas CATEGORIAS ("categorias"), saber o PL
 - A data de hoje é {hoje}.
 - Em caso de dúvida sobre a intenção, prefira "conversar" e peça esclarecimento com gentileza.
 """
+    if editando:
+        system_prompt += _prompt_modo_edicao(editando)
 
     response = client.chat.completions.create(
         messages=[
@@ -162,6 +165,40 @@ Use quando o usuário quiser ver/mexer nas CATEGORIAS ("categorias"), saber o PL
         return dados
     except json.JSONDecodeError:
         raise Exception(f"A IA não retornou um JSON válido: {result}")
+
+
+def _prompt_modo_edicao(g: dict) -> str:
+    """
+    Trecho extra do prompt quando o usuário clicou em "Editar" num lançamento.
+
+    Sem isso, "40 reais" chega à IA sem contexto e ela pede o lançamento
+    inteiro de novo. Com o lançamento atual no prompt, ela devolve SÓ o que
+    mudou; quem junta com o resto (e acerta o sinal do valor) é o código —
+    message_handler._mesclar_correcao. Só entra no prompt durante a edição,
+    então não custa token nas mensagens normais.
+    """
+    atual = json.dumps({k: g.get(k) for k in ("status", "valor", "categoria", "descricao", "data")},
+                       ensure_ascii=False)
+    return f"""
+
+==================== MODO EDIÇÃO (vale só para esta mensagem) ====================
+O usuário tocou em "Editar" neste lançamento e a mensagem dele é, em geral, a CORREÇÃO:
+{atual}
+- Se a mensagem muda algo do lançamento — mesmo curta —, use a ação "corrigir" e mande em "campos" SÓ o que mudou (status, valor, categoria, descricao, data). Valor sempre positivo; o sistema acerta o sinal.
+- Neste modo NÃO peça o lançamento completo: os campos que faltam continuam como estão. Uma mensagem curta que cita um valor, uma data, uma categoria, um tipo ou uma descrição É a correção. Exemplos:
+  • "40 reais" → {{"valor": 40}}
+  • "foi ontem" → {{"data": "<ontem em YYYY-MM-DD>"}}
+  • "categoria lazer" ou só "lazer" → {{"categoria": "Lazer"}}
+  • "era entrada" → {{"status": "Entrada"}}
+  • "descrição: pizza do sábado" → {{"descricao": "pizza do sábado"}}
+- Só use "pedir_dados" se não der para saber o QUE mudar (ex.: "muda isso"), perguntando qual campo ele quer corrigir.
+- Se a mensagem for outro assunto (relatório, outra dúvida, agradecimento), use a ação normal correspondente.
+{{
+  "acao": "corrigir",
+  "campos": {{"valor": 40.0}},
+  "mensagem": ""
+}}
+"""
 
 
 def _resumir_transacoes(transactions: list) -> str:
