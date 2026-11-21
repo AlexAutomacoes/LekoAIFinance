@@ -621,10 +621,9 @@ def tratar_clique_lancamento(data: str, telegram_id: int, first_name: str) -> li
         if row.get("categoria_etapa"):
             salvar_etapa_categoria(user_id, None)
         salvar_edicao(user_id, gasto_id)
-        return aviso + [("✏️ Me mande o lançamento corrigido, do jeito que você registraria. "
-                 "Inclua a data se não for hoje, ex.:\n"
-                 "\"gastei 45 no mercado dia 28/10\"\n\n"
-                 f"Ele vai substituir este:\n{_detalhe_lancamento(g)}\n\n"
+        return aviso + [(f"✏️ Editando este lançamento:\n{_detalhe_lancamento(g)}\n\n"
+                 "O que você quer mudar? Mande só a correção, ex.:\n"
+                 "• \"40 reais\"\n• \"foi dia 20/11\"\n• \"categoria Lazer\"\n• \"era entrada\"\n\n"
                  "(Para desistir, é só mandar \"cancelar\".)")]
 
     return ["Não entendi esse botão. Me peça \"meus lançamentos\" para ver a lista de novo."]
@@ -632,59 +631,82 @@ def tratar_clique_lancamento(data: str, telegram_id: int, first_name: str) -> li
 
 MSG_SAIU_DA_EDICAO = ("ℹ️ Saí da edição do lançamento — ele continua como estava. "
                       "Para corrigir, toque em Editar de novo (ou peça \"meus lançamentos\").")
-MSG_PECA_DE_NOVO = ("Não consegui entender a correção. 🤔 Me mande o lançamento completo, "
-                    "ex.: \"gastei 45 no mercado dia 28/10\" — ou \"cancelar\" para desistir.")
+MSG_PECA_DE_NOVO = ("Não entendi o que mudar. 🤔 Mande só a correção, ex.: \"40 reais\", "
+                    "\"foi ontem\" ou \"categoria Lazer\" — ou \"cancelar\" para desistir.")
 
 
-def _correcao_valida(t: dict):
+CAMPOS_EDITAVEIS = ("status", "valor", "categoria", "descricao", "data")
+
+
+def _mesclar_correcao(atual: dict, mudancas: dict):
     """
-    Confere o que a IA extraiu antes de sobrescrever o lançamento. Devolve os
-    campos prontos para gravar, ou None se algo essencial veio errado.
+    Junta a correção (só os campos que a pessoa citou: "40 reais" → valor) com
+    o lançamento atual. Devolve os campos prontos para gravar, ou None se algo
+    citado veio inválido ou se nada mudou.
 
     No registro normal um dado ruim vira, no máximo, um lançamento estranho a
     mais. Na edição ele SOBRESCREVE um lançamento bom — por isso aqui se valida.
     """
-    status = t.get("status")
+    mudancas = {k: v for k, v in (mudancas or {}).items()
+                if k in CAMPOS_EDITAVEIS and v not in (None, "")}
+    if not mudancas:
+        return None
+
+    status = mudancas.get("status", atual.get("status"))
     if status not in ("Entrada", "Saída"):
         return None
     try:
-        valor = abs(float(t.get("valor")))
-        data = date.fromisoformat(str(t.get("data"))).isoformat()
+        valor = abs(float(mudancas.get("valor", atual.get("valor"))))
+        data = date.fromisoformat(str(mudancas.get("data", atual.get("data")))).isoformat()
     except (TypeError, ValueError):
         return None
     if valor == 0:
         return None
-    return {
+
+    campos = {
         "status": status,
-        # O sinal segue o tipo (convenção do projeto: saída negativa), mesmo
-        # que a IA tenha errado o sinal.
+        # O sinal segue o tipo (convenção do projeto: saída negativa). Assim
+        # "era entrada" sozinho já inverte o sinal, e um valor que a IA mandou
+        # com o sinal errado não estraga nada.
         "valor": -valor if status == "Saída" else valor,
-        "categoria": (t.get("categoria") or "").strip() or "Outros",  # NOT NULL no banco
-        "descricao": t.get("descricao"),
+        "categoria": (str(mudancas.get("categoria", atual.get("categoria")) or "").strip()
+                      or "Outros"),  # NOT NULL no banco
+        "descricao": mudancas.get("descricao", atual.get("descricao")),
         "data": data,
     }
+    if all(campos[k] == atual.get(k) for k in CAMPOS_EDITAVEIS):
+        return None  # "corrigiu" para o que já estava: nada a gravar
+    return campos
 
 
-def _aplicar_edicao(user_row, dados: dict) -> list:
-    """Grava a correção (ação "registrar" da IA) no lançamento que está sendo editado."""
+def _aplicar_edicao(user_row, atual: dict, dados: dict) -> list:
+    """
+    Grava a correção no lançamento que está sendo editado.
+
+    A IA devolve "corrigir" com só os campos que mudaram. Se ela devolver
+    "registrar" (a pessoa mandou o lançamento inteiro de novo), a transação
+    completa serve de correção também — o resultado é o mesmo.
+    """
     user_id = user_row["id"]
     gasto_id = user_row["edicao_gasto_id"]
 
-    campos = _correcao_valida(dados.get("transacao") or {})
+    mudancas = dados.get("campos") if dados.get("acao") == "corrigir" else dados.get("transacao")
+    campos = _mesclar_correcao(atual, mudancas if isinstance(mudancas, dict) else {})
     if campos is None:
         return [MSG_PECA_DE_NOVO]  # a edição continua aberta
 
-    antes = get_lancamento(user_id, gasto_id)
-    ok = antes is not None and atualizar_lancamento(user_id=user_id, gasto_id=gasto_id, **campos)
+    ok = atualizar_lancamento(user_id=user_id, gasto_id=gasto_id, **campos)
     salvar_edicao(user_id, None)
     if not ok:
         return [MSG_LANCAMENTO_SUMIU]
     # Mensagem montada aqui, e não a da IA: a dela diz "Registrei sua
     # transação", o que daria a entender que um lançamento NOVO foi criado.
     # Mostra o "antes" também: se o clique em Editar foi sem querer, a pessoa
-    # vê na hora o que foi substituído (e consegue registrar de novo).
-    return [f"✅ Lançamento corrigido!\n\nAgora:\n{_detalhe_lancamento({**campos, 'id': gasto_id})}"
-            f"\n\nAntes era:\n{_detalhe_lancamento(antes)}"]
+    # vê na hora o que foi substituído. E volta com os botões, para mudar
+    # mais um campo ou excluir sem procurar o lançamento de novo.
+    return [_com_botoes_lancamento(
+        f"✅ Lançamento corrigido!\n\nAgora:\n{_detalhe_lancamento({**campos, 'id': gasto_id})}"
+        f"\n\nAntes era:\n{_detalhe_lancamento(atual)}", gasto_id)]
 
 
 # --- Categorias personalizadas ------------------------------------------------
@@ -728,8 +750,9 @@ def _categoria_da_lista(nome, categorias: list) -> str:
     return por_chave.get(_chave_categoria(CATEGORIA_RESERVA), CATEGORIA_RESERVA)
 
 
-def _interpretar(text: str, user_id: int) -> dict:
-    """Chama a IA com as categorias do usuário e normaliza a categoria escolhida."""
+def _interpretar(text: str, user_id: int, editando: dict = None) -> dict:
+    """Chama a IA com as categorias do usuário e normaliza a categoria escolhida.
+    `editando` = o lançamento que está sendo corrigido (liga o modo edição do prompt)."""
     try:
         categorias = [c["nome"] for c in listar_categorias(user_id)]
     except Exception as e:
@@ -737,9 +760,14 @@ def _interpretar(text: str, user_id: int) -> dict:
         # a IA usa a padrão e a categoria passa sem normalizar.
         logging.error(f"falha ao listar categorias do usuário {user_id}: {e}")
         categorias = None
-    dados = extract_transaction(text, categorias)
+    dados = extract_transaction(text, categorias, editando) if editando else extract_transaction(text, categorias)
+    c = dados.get("campos")
+    if categorias and isinstance(c, dict) and c.get("categoria"):
+        c["categoria"] = _categoria_da_lista(c["categoria"], categorias)
     t = dados.get("transacao")
-    if categorias and isinstance(t, dict):
+    # Na edição, categoria ausente quer dizer "não mudou" — normalizar viraria
+    # "Outros" e trocaria a categoria sem a pessoa pedir.
+    if categorias and isinstance(t, dict) and (t.get("categoria") or not editando):
         escolhida = _categoria_da_lista(t.get("categoria"), categorias)
         # A confirmação ao usuário é escrita pela IA e cita a categoria DELA. Se
         # o código trocou a categoria, aquela mensagem mentiria sobre o que foi
@@ -1178,9 +1206,13 @@ def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dic
         # (_dados_ia presente = a edição já foi encerrada nesta mesma mensagem.)
         if _dados_ia is None and _edicao_ativa(user_row):
             if not texto.startswith("/"):
-                dados = _interpretar(text, internal_id)
-                if dados.get("acao") == "registrar":
-                    return _aplicar_edicao(user_row, dados)
+                atual = get_lancamento(internal_id, user_row["edicao_gasto_id"])
+                if atual is None:  # apagado enquanto a pessoa editava
+                    salvar_edicao(internal_id, None)
+                    return [MSG_LANCAMENTO_SUMIU]
+                dados = _interpretar(text, internal_id, editando=atual)
+                if dados.get("acao") in ("corrigir", "registrar"):
+                    return _aplicar_edicao(user_row, atual, dados)
                 if dados.get("acao") == "pedir_dados":
                     return [dados.get("mensagem") or MSG_PECA_DE_NOVO]  # segue editando
                 # Pediu outra coisa (relatório, apagar, uma dúvida...): a pessoa
