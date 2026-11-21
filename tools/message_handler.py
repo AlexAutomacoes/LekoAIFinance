@@ -8,6 +8,7 @@ Não depende de python-telegram-bot, por isso é reusada tanto pelo bot local (p
 import difflib
 import logging
 import os
+import re
 from datetime import date, datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -638,6 +639,35 @@ MSG_PECA_DE_NOVO = ("Não entendi o que mudar. 🤔 Mande só a correção, ex.:
 CAMPOS_EDITAVEIS = ("status", "valor", "categoria", "descricao", "data")
 
 
+def _valor_solto(texto: str):
+    """
+    "20 reiais", "R$ 35,90", "1.234,56 conto" → o número; None se a mensagem
+    não for só um valor (tem data, mais de um número ou texto demais).
+    Formato brasileiro: ponto é milhar, vírgula é decimal — mas "35.90"
+    (ponto com 2 casas no fim) é lido como decimal, que é o que a pessoa quis.
+    """
+    if re.search(r"\d{1,2}/\d{1,2}", texto):
+        return None  # "dia 20/11" é data, não valor
+    numeros = re.findall(r"\d[\d.,]*", texto)
+    if len(numeros) != 1:
+        return None
+    resto = re.sub(r"[\d.,]+|r\$", " ", texto.lower()).split()
+    if len(resto) > 2:
+        return None  # "foram 20 no mercado e não 10" é para a IA, não para cá
+    n = numeros[0].rstrip(".,")
+    if "," in n:
+        n = n.replace(".", "").replace(",", ".")
+    elif re.search(r"\.\d{2}$", n):
+        n = n[:-3].replace(".", "") + n[-3:]
+    else:
+        n = n.replace(".", "")
+    try:
+        valor = float(n)
+    except ValueError:
+        return None
+    return valor if valor > 0 else None
+
+
 def _mesclar_correcao(atual: dict, mudancas: dict):
     """
     Junta a correção (só os campos que a pessoa citou: "40 reais" → valor) com
@@ -1214,7 +1244,14 @@ def process_message(text: str, telegram_id: int, first_name: str, _dados_ia: dic
                 if dados.get("acao") in ("corrigir", "registrar"):
                     return _aplicar_edicao(user_row, atual, dados)
                 if dados.get("acao") == "pedir_dados":
-                    return [dados.get("mensagem") or MSG_PECA_DE_NOVO]  # segue editando
+                    # Rede de segurança: "20 reiais" já fez a IA pedir o
+                    # lançamento inteiro. Uma mensagem que é só um valor, no
+                    # meio de uma edição, só pode ser o valor novo.
+                    valor = _valor_solto(texto)
+                    if valor is not None:
+                        return _aplicar_edicao(user_row, atual,
+                                               {"acao": "corrigir", "campos": {"valor": valor}})
+                    return [MSG_PECA_DE_NOVO]  # segue editando
                 # Pediu outra coisa (relatório, apagar, uma dúvida...): a pessoa
                 # desistiu de corrigir. Sai da edição e atende o pedido de verdade,
                 # em vez de engolir a mensagem até a edição expirar.

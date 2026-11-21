@@ -191,7 +191,8 @@ O usuário tocou em "Editar" neste lançamento e a mensagem dele é, em geral, a
   • "categoria lazer" ou só "lazer" → {{"categoria": "Lazer"}}
   • "era entrada" → {{"status": "Entrada"}}
   • "descrição: pizza do sábado" → {{"descricao": "pizza do sábado"}}
-- Só use "pedir_dados" se não der para saber o QUE mudar (ex.: "muda isso"), perguntando qual campo ele quer corrigir.
+- Erros de digitação não mudam nada: "20 reiais", "40 conto", "R$35" são correção de valor.
+- Só use "pedir_dados" se não der para saber o QUE mudar (ex.: "muda isso"), perguntando qual campo ele quer corrigir. Neste modo é PROIBIDO responder com a mensagem padrão de registro ("Para registrar, me conta...").
 - Se a mensagem for outro assunto (relatório, outra dúvida, agradecimento), use a ação normal correspondente.
 {{
   "acao": "corrigir",
