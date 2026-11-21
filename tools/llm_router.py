@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 from collections import defaultdict
 from dotenv import load_dotenv
 from groq import Groq
@@ -21,6 +22,24 @@ def _get_client():
     if not GROQ_API_KEY:
         raise Exception("GROQ_API_KEY não configurada no .env")
     return Groq(api_key=GROQ_API_KEY)
+
+def _logar_uso(response) -> None:
+    """
+    Registra no log quantos tokens a chamada gastou e quantos vieram do cache.
+    Token em cache não conta na cota diária da conta gratuita, então é por este
+    log (nos logs da Vercel) que dá para saber quanto a cota rende de verdade.
+    Medição nunca pode derrubar a mensagem do usuário.
+    """
+    try:
+        uso = response.usage
+        detalhes = getattr(uso, "prompt_tokens_details", None)
+        logging.info("groq tokens: entrada=%s cache=%s saida=%s",
+                     uso.prompt_tokens,
+                     getattr(detalhes, "cached_tokens", None) if detalhes else None,
+                     uso.completion_tokens)
+    except Exception as e:
+        logging.warning(f"não consegui ler o uso de tokens da Groq: {e}")
+
 
 def extract_transaction(text: str, categorias: list | None = None, editando: dict | None = None) -> dict:
     """
@@ -52,7 +71,7 @@ Você NUNCA responde em texto livre: sua saída é SEMPRE um único objeto JSON 
 - Registre APENAS o que o usuário informou. Nunca invente valor, tipo (entrada/saída), categoria, descrição ou data.
 - Se faltar o VALOR, ou não der para saber com certeza se é entrada ou saída, use "pedir_dados". Nunca presuma.
 - Nesta etapa você NÃO tem acesso ao histórico nem ao saldo do usuário. Portanto nunca afirme saldos, totais ou transações passadas. Se perguntarem algo como "quanto gastei?", trate como pedido de relatório ("pedir_periodo" ou "relatorio").
-- A categoria é SEMPRE uma destas, escrita exatamente assim: {lista_categorias}. Escolha a que melhor combina com a descrição (ex.: "mercado" → Alimentação; "uber" → Transporte). Sem base clara, use "Outros". Nunca invente categoria fora da lista.
+- A categoria é SEMPRE uma das CATEGORIAS DO USUÁRIO (lista no fim destas instruções), escrita exatamente como está lá. Escolha a que melhor combina com a descrição (ex.: "mercado" → Alimentação; "uber" → Transporte). Sem base clara, use "Outros". Nunca invente categoria fora da lista.
 - Se o usuário quiser ver, criar, renomear ou excluir CATEGORIAS, use a ação "abrir" com "tela": "categorias".
 
 ==================== ESTILO DAS MENSAGENS (campo "mensagem") ====================
@@ -79,7 +98,7 @@ Mensagem sugerida (pode adaptar levemente, mantendo a clareza):
 }}
 
 AÇÃO 3 — "registrar"
-Use quando houver dados suficientes (valor + entrada/saída; categoria e descrição podem ser inferidas). Se a data não for informada, use hoje ({hoje}).
+Use quando houver dados suficientes (valor + entrada/saída; categoria e descrição podem ser inferidas). Se a data não for informada, use a DATA DE HOJE (no fim destas instruções).
 No JSON, "valor" é NEGATIVO para Saída e POSITIVO para Entrada.
 Na "mensagem", confirme de forma organizada: exiba o valor em reais (ex.: R$ 50,00) e a data em DD/MM/AAAA.
 {{
@@ -104,7 +123,7 @@ Use quando pedirem relatório, extrato, resumo ou histórico SEM informar o per�
 AÇÃO 5 — "relatorio"
 Use quando pedirem relatório/extrato/resumo COM período (ex.: "relatório de junho", "gastos de hoje em pdf", "extrato do dia 10 ao 13 em excel").
 Converta o período para datas no formato YYYY-MM-DD. Se citarem "pdf" ou "excel", defina "formato" conforme; caso contrário use "opcao".
-Referências: "hoje" = {hoje}; "ontem"/"último dia" = o dia anterior; "este mês" = do dia 01 do mês atual até hoje; "mês passado"/"último mês" = do dia 01 ao último dia do mês anterior.
+Referências: "hoje" = a DATA DE HOJE (no fim destas instruções); "ontem"/"último dia" = o dia anterior; "este mês" = do dia 01 do mês atual até hoje; "mês passado"/"último mês" = do dia 01 ao último dia do mês anterior.
 {{
   "acao": "relatorio",
   "mensagem": "Perfeito! Já estou preparando o seu relatório 📊",
@@ -136,9 +155,16 @@ Use quando o usuário quiser ver/mexer nas CATEGORIAS ("categorias"), saber o PL
 
 ==================== FORMATO DE SAÍDA ====================
 - Responda SEMPRE com UM único objeto JSON válido, sem nenhum texto antes ou depois e sem cercar em blocos de código.
-- A data de hoje é {hoje}.
 - Em caso de dúvida sobre a intenção, prefira "conversar" e peça esclarecimento com gentileza.
+
+==================== DADOS DESTE USUÁRIO ====================
+- DATA DE HOJE: {hoje}
+- CATEGORIAS DO USUÁRIO: {lista_categorias}
 """
+    # O que muda de pessoa para pessoa (categorias) ou de dia para dia (data)
+    # fica SÓ no fim do prompt, de propósito: a Groq reaproveita do cache o
+    # começo idêntico entre chamadas, e token em cache não conta na cota
+    # diária. Uma variável no meio quebrava o cache de tudo que vinha depois.
     if editando:
         system_prompt += _prompt_modo_edicao(editando)
 
@@ -157,7 +183,8 @@ Use quando o usuário quiser ver/mexer nas CATEGORIAS ("categorias"), saber o PL
         temperature=0.0,
         response_format={"type": "json_object"}
     )
-    
+    _logar_uso(response)
+
     result = response.choices[0].message.content.strip()
         
     try:
@@ -306,5 +333,6 @@ Responda em texto simples, NÃO retorne JSON."""
         model=GROQ_MODEL,
         temperature=0.7,
     )
-    
+    _logar_uso(response)
+
     return response.choices[0].message.content.strip()
